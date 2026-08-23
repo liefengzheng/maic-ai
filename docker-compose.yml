@@ -1,0 +1,11 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: maic_ai
+      POSTGRES_USER: maic
+      POSTGRES_PASSWORD: maic
+    ports: ["5432:5432"]
+    volumes: ["maic_postgres:/var/lib/postgresql/data"]
+volumes:
+  maic_postgres:
