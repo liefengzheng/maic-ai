@@ -12,8 +12,8 @@ services:
     environment:
       NODE_ENV: production
       COOKIE_SECURE: "false"
-      WEB_ORIGIN: http://haigoose.com,http://www.haigoose.com
-      GOOGLE_CALLBACK_URL: http://haigoose.com/auth/google/callback
+      WEB_ORIGIN: http://ai.maic.haigoose.com
+      GOOGLE_CALLBACK_URL: http://ai.maic.haigoose.com/auth/google/callback
     networks:
       - maic-net
 
