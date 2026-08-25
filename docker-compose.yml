@@ -1,11 +1,47 @@
+version: "3.8"
+
 services:
-  postgres:
-    image: postgres:16-alpine
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: maic-api
+    restart: unless-stopped
+    env_file:
+      - ./apps/api/.env
     environment:
-      POSTGRES_DB: maic_ai
-      POSTGRES_USER: maic
-      POSTGRES_PASSWORD: maic
-    ports: ["5432:5432"]
-    volumes: ["maic_postgres:/var/lib/postgresql/data"]
-volumes:
-  maic_postgres:
+      NODE_ENV: production
+      COOKIE_SECURE: "false"
+      WEB_ORIGIN: http://haigoose.com,http://www.haigoose.com
+      GOOGLE_CALLBACK_URL: http://haigoose.com/auth/google/callback
+    networks:
+      - maic-net
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: maic-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    networks:
+      - maic-net
+
+  nginx:
+    image: nginx:alpine
+    container_name: maic-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - web
+      - api
+    networks:
+      - maic-net
+
+networks:
+  maic-net:
+    driver: bridge
