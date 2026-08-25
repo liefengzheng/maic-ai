@@ -17,7 +17,7 @@ COPY packages packages
 ENV VITE_API_BASE_URL=
 RUN npm run build -w @maic/web
 
-FROM nginx:alpine
+FROM nginx:1.25-alpine
 RUN rm /etc/nginx/conf.d/default.conf
 COPY --from=builder /app/apps/web/dist /usr/share/nginx/html
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf

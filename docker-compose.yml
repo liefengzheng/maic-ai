@@ -29,7 +29,7 @@ services:
       - maic-net
 
   nginx:
-    image: nginx:alpine
+    image: nginx:1.25-alpine
     container_name: maic-nginx
     restart: unless-stopped
     ports:
