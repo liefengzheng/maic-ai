@@ -1,0 +1,1 @@
+"""Built-in LLM provider adapters discovered by app.llm.factory."""

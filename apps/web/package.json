@@ -13,10 +13,6 @@
     "format:check": "prettier --check ."
   },
   "dependencies": {
-    "@maic/content": "*",
-    "@maic/types": "*",
-    "@maic/utils": "*",
-    "@maic/validation": "*",
     "@radix-ui/react-avatar": "^1.1.10",
     "@radix-ui/react-dialog": "^1.1.15",
     "@tiptap/react": "^3.4.4",
@@ -32,7 +28,8 @@
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
-    "tailwindcss": "^4.1.4"
+    "tailwindcss": "^4.1.4",
+    "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

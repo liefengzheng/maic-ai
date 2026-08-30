@@ -20,7 +20,7 @@ import {
   Sparkles,
   Upload,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import {
   Link,
@@ -30,10 +30,11 @@ import {
   Routes,
   useNavigate,
 } from "react-router-dom";
-import { capabilities, changelog, scenes } from "@maic/content";
-import { loginSchema, registerSchema } from "@maic/validation";
 import { apiUrl } from "./api";
+import { capabilities, changelog, scenes } from "./content";
 import { authResolvedAtom, userAtom } from "./state";
+import type { AgentChoice, ChatMessage, Conversation, User } from "./types";
+import { loginSchema, registerSchema } from "./validation";
 
 function AgentMark({ compact = false }: { compact?: boolean }) {
   return (
@@ -241,7 +242,7 @@ function Login() {
         body: JSON.stringify(parsed.data),
       });
       const payload = (await response.json()) as {
-        user?: import("@maic/types").User;
+        user?: User;
         message?: string;
       };
       if (!response.ok || !payload.user) {
@@ -350,7 +351,7 @@ function Register() {
       body: JSON.stringify(parsed.data),
     });
     const payload = (await response.json()) as {
-      user?: import("@maic/types").User;
+      user?: User;
       message?: string;
     };
     if (!response.ok || !payload.user)
@@ -439,7 +440,14 @@ function Register() {
 }
 
 type AccountSection =
-  "billing" | "usage" | "models" | "prompts" | "keys" | "profile" | "changelog";
+  | "billing"
+  | "usage"
+  | "agents"
+  | "models"
+  | "prompts"
+  | "keys"
+  | "profile"
+  | "changelog";
 
 function Account() {
   const [user, setUser] = useAtom(userAtom);
@@ -461,6 +469,9 @@ function Account() {
     ["profile", "个人资料", CircleUserRound],
     ["changelog", "更新日志", MessageSquareText],
   ];
+  if (user.role === "admin") {
+    nav.splice(2, 0, ["agents", "Agent 管理", Bot]);
+  }
   return (
     <div className="account-layout">
       <aside>
@@ -492,19 +503,126 @@ function Account() {
   );
 }
 
+function AdminAgents() {
+  const [agents, setAgents] = useState<AgentChoice[]>([]);
+  const [name, setName] = useState("");
+  const [slug, setSlug] = useState("");
+  const [description, setDescription] = useState("");
+  const [systemPrompt, setSystemPrompt] = useState("");
+  const [visibility, setVisibility] = useState<"private" | "tenant">("private");
+  const [status, setStatus] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    void fetch(apiUrl("/agents/available"), { credentials: "include" })
+      .then((response) => (response.ok ? response.json() : []))
+      .then((loaded: AgentChoice[]) => setAgents(loaded.filter(({ kind }) => kind === "agent")));
+  }, []);
+
+  const create = async (event: FormEvent) => {
+    event.preventDefault();
+    if (saving) return;
+    setSaving(true);
+    setStatus("正在创建 Agent");
+    try {
+      const response = await fetch(apiUrl("/agents"), {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, slug, description: description || null, systemPrompt, visibility }),
+      });
+      const payload = (await response.json()) as AgentChoice & { message?: string };
+      if (!response.ok) throw new Error(payload.message ?? "创建 Agent 失败");
+      setStatus("正在生成 Graph");
+      const graphResponse = await fetch(apiUrl(`/agents/${payload.id}/graph`), {
+        method: "POST",
+        credentials: "include",
+      });
+      const graphPayload = (await graphResponse.json()) as { message?: string };
+      if (!graphResponse.ok) throw new Error(graphPayload.message ?? "Graph 生成失败");
+      setAgents((current) => [payload, ...current]);
+      setName("");
+      setSlug("");
+      setDescription("");
+      setSystemPrompt("");
+      setStatus("Graph 已生成，可以在 Chat 中使用");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "操作失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <header className="account-heading">
+        <h1>Agent 管理</h1>
+        <p>{status || "租户 Agent"}</p>
+      </header>
+      <div className="agent-admin-layout">
+        <form className="agent-create-form" onSubmit={create}>
+          <label>
+            名称
+            <input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} />
+          </label>
+          <label>
+            Slug
+            <input
+              required
+              pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
+              placeholder="research-agent"
+              value={slug}
+              onChange={(event) => setSlug(event.target.value.toLowerCase())}
+            />
+          </label>
+          <label>
+            可见范围
+            <select value={visibility} onChange={(event) => setVisibility(event.target.value as "private" | "tenant")}>
+              <option value="private">仅自己</option>
+              <option value="tenant">整个租户</option>
+            </select>
+          </label>
+          <label>
+            描述
+            <input maxLength={2000} value={description} onChange={(event) => setDescription(event.target.value)} />
+          </label>
+          <label>
+            System prompt
+            <textarea required value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} />
+          </label>
+          <button disabled={saving} type="submit">
+            <Sparkles /> {saving ? "处理中" : "创建并生成 Graph"}
+          </button>
+        </form>
+        <section className="managed-agent-list">
+          {agents.map((agent) => (
+            <article key={agent.id}>
+              <Bot />
+              <span><strong>{agent.name}</strong><small>{agent.description ?? "Agent"}</small></span>
+              <b>可用</b>
+            </article>
+          ))}
+          {agents.length === 0 && <p className="empty-state">暂无 Agent</p>}
+        </section>
+      </div>
+    </>
+  );
+}
+
 function AccountPanel({
   section,
   user,
   setUser,
 }: {
   section: AccountSection;
-  user: import("@maic/types").User;
-  setUser: (user: import("@maic/types").User) => void;
+  user: User;
+  setUser: (user: User) => void;
 }) {
   const [prompts, setPrompts] = useState(["默认系统提示词"]);
   const [promptName, setPromptName] = useState("");
   const [apiKeys, setApiKeys] = useState<string[]>([]);
   const [name, setName] = useState(user.displayName);
+  if (section === "agents") return <AdminAgents />;
   if (section === "billing")
     return (
       <>
@@ -880,46 +998,173 @@ function Changelog() {
 function Chat() {
   const [user] = useAtom(userAtom);
   const [draft, setDraft] = useState("");
-  const [messages, setMessages] = useState<string[]>([]);
-  const [activeConversation, setActiveConversation] = useState("新对话");
-  const [modelPickerOpen, setModelPickerOpen] = useState(false);
-  const [modelSearch, setModelSearch] = useState("");
-  const [selectedModel, setSelectedModel] = useState("DeepSeek V3.2");
-  const modelPickerRef = useRef<HTMLDivElement>(null);
-  const modelGroups = [
-    [
-      "Anthropic",
-      [
-        "Claude Sonnet 5.67 折",
-        "Claude Opus 5",
-        "Claude Opus 4.8",
-        "Claude Fable 5",
-        "GLM-5.2 85 折",
-      ],
-    ],
-    ["DeepClaude", ["DeepGeminiPro", "DeepSeek V3.2"]],
-  ] as const;
+  const [messages, setMessages] = useState<
+    Pick<ChatMessage, "role" | "content">[]
+  >([]);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [availableAgents, setAvailableAgents] = useState<AgentChoice[]>([]);
+  const [selectedAgentKey, setSelectedAgentKey] = useState("default");
+  const [conversationSearch, setConversationSearch] = useState("");
+  const [activeConversationId, setActiveConversationId] = useState<
+    string | null
+  >(null);
+  const [agentStatus, setAgentStatus] = useState("");
+  const [sending, setSending] = useState(false);
+  const activeConversation = conversations.find(
+    ({ id }) => id === activeConversationId,
+  );
+  const selectedAgent = availableAgents.find(
+    ({ id, kind }) => `${kind}:${id}` === selectedAgentKey,
+  );
+  const visibleConversations = conversations.filter(({ title }) =>
+    title.toLocaleLowerCase().includes(conversationSearch.trim().toLocaleLowerCase()),
+  );
+
   useEffect(() => {
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (
-        modelPickerRef.current &&
-        !modelPickerRef.current.contains(event.target as Node)
-      )
-        setModelPickerOpen(false);
+    if (!user) return;
+    const loadConversations = async () => {
+      const [conversationResponse, agentResponse] = await Promise.all([
+        fetch(apiUrl("/conversations"), { credentials: "include" }),
+        fetch(apiUrl("/agents/available"), { credentials: "include" }),
+      ]);
+      if (!conversationResponse.ok) return;
+      const loaded = (await conversationResponse.json()) as Conversation[];
+      setConversations(loaded);
+      if (agentResponse.ok) {
+        setAvailableAgents((await agentResponse.json()) as AgentChoice[]);
+      }
+      if (loaded[0]) {
+        setActiveConversationId(loaded[0].id);
+        setSelectedAgentKey(
+          loaded[0].targetId
+            ? `${loaded[0].targetKind}:${loaded[0].targetId}`
+            : "default",
+        );
+      }
     };
-    if (modelPickerOpen)
-      document.addEventListener("pointerdown", closeOnOutsidePointer);
-    return () =>
-      document.removeEventListener("pointerdown", closeOnOutsidePointer);
-  }, [modelPickerOpen]);
-  const send = () => {
-    const content = draft.trim();
-    if (!content) return;
-    setMessages((current) => [...current, content]);
-    setDraft("");
+    void loadConversations();
+  }, [user]);
+
+  useEffect(() => {
+    if (!activeConversationId) {
+      setMessages([]);
+      return;
+    }
+    void fetch(apiUrl(`/conversations/${activeConversationId}/messages`), {
+      credentials: "include",
+    })
+      .then((response) => (response.ok ? response.json() : []))
+      .then((loaded: ChatMessage[]) => setMessages(loaded));
+  }, [activeConversationId]);
+
+  const beginConversation = (agentKey = selectedAgentKey) => {
+    setMessages([]);
+    setActiveConversationId(null);
+    setSelectedAgentKey(agentKey);
+    setAgentStatus("");
   };
-  const matches = (model: string) =>
-    model.toLowerCase().includes(modelSearch.toLowerCase());
+
+  const openConversation = (conversation: Conversation) => {
+    setActiveConversationId(conversation.id);
+    setSelectedAgentKey(
+      conversation.targetId
+        ? `${conversation.targetKind}:${conversation.targetId}`
+        : "default",
+    );
+    setAgentStatus("");
+  };
+
+  const createConversation = async () => {
+    const response = await fetch(apiUrl("/conversations"), {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "新对话",
+        targetKind: selectedAgent?.kind ?? null,
+        targetId: selectedAgent?.id ?? null,
+      }),
+    });
+    if (!response.ok) throw new Error("创建对话失败");
+    const conversation = (await response.json()) as Conversation;
+    setConversations((current) => [conversation, ...current]);
+    setActiveConversationId(conversation.id);
+    return conversation.id;
+  };
+
+  const send = async () => {
+    const content = draft.trim();
+    if (!content || sending) return;
+    setSending(true);
+    setAgentStatus("正在思考");
+    setDraft("");
+    try {
+      const conversationId =
+        activeConversationId ?? (await createConversation());
+      setMessages((current) => [
+        ...current,
+        { role: "user", content },
+        { role: "assistant", content: "" },
+      ]);
+      const response = await fetch(
+        apiUrl(`/conversations/${conversationId}/runs`),
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ content }),
+        },
+      );
+      if (!response.ok || !response.body) throw new Error("Agent 请求失败");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value, { stream: !done });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+        for (const event of events) {
+          const eventName = event.match(/^event: (.+)$/m)?.[1];
+          const rawData = event.match(/^data: (.+)$/m)?.[1];
+          if (!rawData) continue;
+          const payload = JSON.parse(rawData) as {
+            content?: string;
+            agent?: string;
+            name?: string;
+            status?: string;
+            message?: string;
+          };
+          if (
+            eventName === "token" &&
+            payload.agent === "coordinator" &&
+            payload.content
+          ) {
+            setMessages((current) =>
+              current.map((message, index) =>
+                index === current.length - 1
+                  ? { ...message, content: message.content + payload.content }
+                  : message,
+              ),
+            );
+          } else if (eventName === "tool") {
+            setAgentStatus(
+              `${payload.agent}: ${payload.name} ${payload.status === "started" ? "运行中" : "已完成"}`,
+            );
+          } else if (eventName === "error") {
+            throw new Error(payload.message ?? "Agent 执行失败");
+          }
+        }
+        if (done) break;
+      }
+      setAgentStatus("");
+    } catch (error) {
+      setAgentStatus(error instanceof Error ? error.message : "发送失败");
+    } finally {
+      setSending(false);
+    }
+  };
+
   if (!user) return <Login />;
   return (
     <main className="chat-workspace">
@@ -931,25 +1176,63 @@ function Chat() {
         </div>
         <button
           className="new-chat"
-          onClick={() => {
-            setMessages([]);
-            setActiveConversation("新对话");
-          }}
+          onClick={() => beginConversation()}
         >
           <Plus /> 创建新对话
         </button>
+        <section className="agent-selector" aria-label="可用 Agent">
+          <p className="chat-group-label">可用 Agent</p>
+          <button
+            className={`agent-option${selectedAgentKey === "default" ? " active" : ""}`}
+            onClick={() => beginConversation("default")}
+          >
+            <Bot />
+            <span><strong>MAIC AI</strong><small>默认协调 Agent</small></span>
+          </button>
+          {availableAgents.map((agent) => {
+            const key = `${agent.kind}:${agent.id}`;
+            return (
+              <button
+                className={`agent-option${selectedAgentKey === key ? " active" : ""}`}
+                key={key}
+                title={agent.description ?? agent.name}
+                onClick={() => beginConversation(key)}
+              >
+                {agent.kind === "super_agent" ? <Sparkles /> : <Bot />}
+                <span>
+                  <strong>{agent.name}</strong>
+                  <small>{agent.kind === "super_agent" ? "SuperAgent" : "Agent"}</small>
+                </span>
+              </button>
+            );
+          })}
+        </section>
+        <p className="chat-group-label history-label">历史记录</p>
         <label className="chat-search">
           <Search />
-          <input placeholder="搜索对话..." />
+          <input
+            value={conversationSearch}
+            onChange={(event) => setConversationSearch(event.target.value)}
+            placeholder="搜索对话..."
+          />
         </label>
-        <p className="chat-group-label">今天</p>
-        <button
-          className="conversation active"
-          onClick={() => setActiveConversation("默认对话")}
-        >
-          {activeConversation}
-        </button>
-        <p className="chat-sidebar-note">已加载全部对话</p>
+        <div className="conversation-list">
+          {visibleConversations.map((conversation) => (
+            <button
+              className={`conversation${conversation.id === activeConversationId ? " active" : ""}`}
+              key={conversation.id}
+              title={conversation.targetName ?? "MAIC AI"}
+              onClick={() => openConversation(conversation)}
+            >
+              {conversation.title}
+            </button>
+          ))}
+          {visibleConversations.length === 0 && (
+            <p className="chat-sidebar-note">
+              {conversationSearch ? "没有匹配的对话" : "还没有历史对话"}
+            </p>
+          )}
+        </div>
         <div className="chat-sidebar-bottom">
           <Link to="/">
             <HomeIcon /> 官网首页
@@ -980,22 +1263,26 @@ function Chat() {
       </aside>
       <section className="chat-main">
         <header className="chat-topbar">
-          <h1>{activeConversation}</h1>
+          <h1>{activeConversation?.title ?? "新对话"}</h1>
           <div>
             <button aria-label="切换侧栏">
               <PanelLeft />
             </button>
             <span className="system-prompt">
-              <MessageSquareText /> 系统默认提示词...
+              <MessageSquareText /> {selectedAgent?.name ?? "MAIC AI"}
             </span>
           </div>
         </header>
         <div className="chat-messages">
           {messages.map((message, index) => (
-            <article className="chat-bubble" key={`${message}-${index}`}>
-              {message}
+            <article
+              className={`chat-bubble ${message.role}`}
+              key={`${message.role}-${index}`}
+            >
+              {message.content}
             </article>
           ))}
+          {agentStatus && <p className="chat-sidebar-note">{agentStatus}</p>}
         </div>
         <div className="chat-composer">
           <textarea
@@ -1004,7 +1291,7 @@ function Chat() {
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
-                send();
+                void send();
               }
             }}
             placeholder="有什么可以帮助到你的？"
@@ -1017,51 +1304,17 @@ function Chat() {
               <Lightbulb />
             </button>
             <span>0%</span>
-            <div className="model-picker-anchor" ref={modelPickerRef}>
-              <button
-                className="model-select"
-                onClick={() => setModelPickerOpen(!modelPickerOpen)}
-              >
-                <Bot /> <span>{selectedModel}</span>
-              </button>
-              {modelPickerOpen && (
-                <section className="model-picker">
-                  <label>
-                    <Search />
-                    <input
-                      autoFocus
-                      value={modelSearch}
-                      onChange={(event) => setModelSearch(event.target.value)}
-                      placeholder="搜索模型..."
-                    />
-                    <button onClick={() => setModelPickerOpen(false)}>×</button>
-                  </label>
-                  {modelGroups.map(([provider, models]) => {
-                    const visibleModels = models.filter(matches);
-                    return visibleModels.length ? (
-                      <div key={provider}>
-                        <small>{provider}</small>
-                        {visibleModels.map((model) => (
-                          <button
-                            className={
-                              model === selectedModel ? "selected" : ""
-                            }
-                            key={model}
-                            onClick={() => {
-                              setSelectedModel(model);
-                              setModelPickerOpen(false);
-                            }}
-                          >
-                            <Sparkles /> {model}
-                          </button>
-                        ))}
-                      </div>
-                    ) : null;
-                  })}
-                </section>
-              )}
+            <div className="model-picker-anchor">
+              <span className="model-select">
+                <Bot /> <span>{selectedAgent?.name ?? "MAIC AI"}</span>
+              </span>
             </div>
-            <button className="send-button" onClick={send} aria-label="发送">
+            <button
+              className="send-button"
+              onClick={() => void send()}
+              aria-label="发送"
+              disabled={sending}
+            >
               <SendHorizontal />
             </button>
           </div>
@@ -1081,10 +1334,7 @@ export default function App() {
   useEffect(() => {
     fetch(apiUrl("/auth/me"), { credentials: "include" })
       .then(async (response) =>
-        response.ok
-          ? ((await response.json()) as { user: import("@maic/types").User })
-              .user
-          : null,
+        response.ok ? ((await response.json()) as { user: User }).user : null,
       )
       .then(setUser)
       .catch(() => setUser(null))

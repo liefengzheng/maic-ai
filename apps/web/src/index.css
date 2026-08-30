@@ -733,6 +733,96 @@ footer span {
   cursor: pointer;
   font: 600 12px var(--sans);
 }
+.agent-admin-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.9fr) minmax(320px, 1.1fr);
+  gap: 20px;
+  margin-top: 24px;
+}
+.agent-create-form {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid #303030;
+  border-radius: 8px;
+}
+.agent-create-form label {
+  display: grid;
+  gap: 7px;
+  color: #bbb;
+  font-size: 12px;
+}
+.agent-create-form input,
+.agent-create-form select,
+.agent-create-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #363636;
+  border-radius: 6px;
+  padding: 10px 11px;
+  outline: 0;
+  background: #161616;
+  color: #eee;
+  font: 13px var(--sans);
+}
+.agent-create-form textarea {
+  min-height: 150px;
+  resize: vertical;
+}
+.agent-create-form button {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  border-radius: 6px;
+  padding: 9px 13px;
+  background: #f2f2f2;
+  color: #161616;
+  cursor: pointer;
+  font-weight: 700;
+}
+.agent-create-form button:disabled {
+  opacity: 0.5;
+}
+.agent-create-form button svg {
+  width: 15px;
+}
+.managed-agent-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+.managed-agent-list article {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  padding: 13px 14px;
+  border: 1px solid #303030;
+  border-radius: 8px;
+}
+.managed-agent-list article > svg {
+  width: 18px;
+}
+.managed-agent-list article > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.managed-agent-list strong,
+.managed-agent-list small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.managed-agent-list small {
+  color: #888;
+}
+.managed-agent-list b {
+  color: #75c995;
+  font-size: 11px;
+}
 .settings-list button:hover,
 .manager-toolbar button:hover,
 .profile-form button:hover {
@@ -1166,6 +1256,58 @@ footer span {
   color: #777;
   font-size: 11px;
 }
+.agent-selector {
+  display: grid;
+  gap: 4px;
+  margin-top: 16px;
+}
+.agent-option {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #aaa;
+  cursor: pointer;
+  text-align: left;
+}
+.agent-option:hover,
+.agent-option.active {
+  background: #292929;
+  color: #eee;
+}
+.agent-option > svg {
+  width: 16px;
+}
+.agent-option > span {
+  min-width: 0;
+  display: grid;
+}
+.agent-option strong,
+.agent-option small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-option strong {
+  font-size: 12px;
+}
+.agent-option small {
+  color: #777;
+  font-size: 10px;
+}
+.history-label {
+  margin-top: 16px;
+}
+.conversation-list {
+  min-height: 48px;
+  max-height: 30vh;
+  overflow-y: auto;
+}
 .conversation {
   padding: 8px;
   margin-top: 5px;
@@ -1591,6 +1733,9 @@ footer span {
   }
   .account-main {
     padding: 30px 18px;
+  }
+  .agent-admin-layout {
+    grid-template-columns: 1fr;
   }
   .balance {
     align-items: flex-start;

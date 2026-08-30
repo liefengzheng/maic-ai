@@ -1,20 +1,17 @@
-FROM node:22-bookworm-slim
+FROM python:3.12-slim
 
-WORKDIR /app
+COPY --from=ghcr.io/astral-sh/uv:0.10.11 /uv /uvx /bin/
 
-COPY package.json package-lock.json ./
-COPY .npmrc .npmrc
-COPY apps/api/package.json apps/api/package.json
-COPY apps/web/package.json apps/web/package.json
-COPY packages/content/package.json packages/content/package.json
-COPY packages/types/package.json packages/types/package.json
-COPY packages/utils/package.json packages/utils/package.json
-COPY packages/validation/package.json packages/validation/package.json
-RUN npm ci
+WORKDIR /app/apps/api
 
-COPY apps/api apps/api
-COPY packages packages
+ENV PYTHONDONTWRITEBYTECODE=1 \
+	PYTHONUNBUFFERED=1
+
+COPY apps/api/pyproject.toml apps/api/uv.lock ./
+RUN uv sync --frozen --no-dev
+
+COPY apps/api .
 
 EXPOSE 3001
 
-CMD ["npm", "exec", "tsx", "apps/api/src/server.ts"]
+CMD ["uv", "run", "--frozen", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "3001"]
