@@ -21,8 +21,6 @@ class LoginInput(ApiModel):
 
 class UserOutput(ApiModel):
     id: UUID
-    tenant_id: UUID = Field(alias="tenantId")
-    tenant_name: str = Field(alias="tenantName")
     role: str
     email: EmailStr
     display_name: str = Field(alias="displayName")
@@ -69,20 +67,68 @@ class AgentChoiceOutput(ApiModel):
     system_prompt: str = Field(alias="systemPrompt")
 
 
-class AgentCreateInput(ApiModel):
+class CapabilityInput(ApiModel):
+    name: str = Field(min_length=1, max_length=120)
+    slug: str = Field(min_length=1, max_length=160, pattern="^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    description: str | None = Field(default=None, max_length=2000)
+    enabled: bool = True
+
+
+class ToolInput(CapabilityInput):
+    handler: str = Field(min_length=1, max_length=255)
+
+
+class ToolOutput(ToolInput):
+    id: UUID
+
+
+class McpServerInput(CapabilityInput):
+    transport: str = Field(default="http", pattern="^(http|sse)$")
+    url: str = Field(min_length=1, max_length=4000)
+
+
+class McpServerOutput(McpServerInput):
+    id: UUID
+
+
+class AgentInput(ApiModel):
     name: str = Field(min_length=1, max_length=120)
     slug: str = Field(min_length=1, max_length=160, pattern="^[a-z0-9]+(?:-[a-z0-9]+)*$")
     description: str | None = Field(default=None, max_length=2000)
     system_prompt: str = Field(alias="systemPrompt", min_length=1, max_length=50000)
-    visibility: str = Field(default="private", pattern="^(private|tenant)$")
+    enabled: bool = True
     tool_ids: list[UUID] = Field(default_factory=list, alias="toolIds")
     mcp_server_ids: list[UUID] = Field(default_factory=list, alias="mcpServerIds")
 
 
 class AgentOutput(AgentChoiceOutput):
     slug: str
-    visibility: str
+    enabled: bool
+    tool_ids: list[UUID] = Field(default_factory=list, alias="toolIds")
+    mcp_server_ids: list[UUID] = Field(default_factory=list, alias="mcpServerIds")
     graph_status: str = Field(alias="graphStatus")
+
+
+class SuperAgentInput(ApiModel):
+    name: str = Field(min_length=1, max_length=120)
+    slug: str = Field(min_length=1, max_length=160, pattern="^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    description: str | None = Field(default=None, max_length=2000)
+    system_prompt: str = Field(alias="systemPrompt", min_length=1, max_length=50000)
+    enabled: bool = True
+    agent_ids: list[UUID] = Field(default_factory=list, alias="agentIds")
+
+
+class SuperAgentOutput(AgentChoiceOutput):
+    slug: str
+    enabled: bool
+    agent_ids: list[UUID] = Field(default_factory=list, alias="agentIds")
+
+
+class AgentCatalogOutput(ApiModel):
+    tools: list[ToolOutput]
+    mcp_servers: list[McpServerOutput] = Field(alias="mcpServers")
+    agents: list[AgentOutput]
+    super_agents: list[SuperAgentOutput] = Field(alias="superAgents")
 
 
 class AgentGraphOutput(ApiModel):

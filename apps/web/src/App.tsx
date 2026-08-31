@@ -31,6 +31,7 @@ import {
   useNavigate,
 } from "react-router-dom";
 import { apiUrl } from "./api";
+import { CatalogManager } from "./CatalogManager";
 import { capabilities, changelog, scenes } from "./content";
 import { authResolvedAtom, userAtom } from "./state";
 import type { AgentChoice, ChatMessage, Conversation, User } from "./types";
@@ -503,112 +504,6 @@ function Account() {
   );
 }
 
-function AdminAgents() {
-  const [agents, setAgents] = useState<AgentChoice[]>([]);
-  const [name, setName] = useState("");
-  const [slug, setSlug] = useState("");
-  const [description, setDescription] = useState("");
-  const [systemPrompt, setSystemPrompt] = useState("");
-  const [visibility, setVisibility] = useState<"private" | "tenant">("private");
-  const [status, setStatus] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    void fetch(apiUrl("/agents/available"), { credentials: "include" })
-      .then((response) => (response.ok ? response.json() : []))
-      .then((loaded: AgentChoice[]) => setAgents(loaded.filter(({ kind }) => kind === "agent")));
-  }, []);
-
-  const create = async (event: FormEvent) => {
-    event.preventDefault();
-    if (saving) return;
-    setSaving(true);
-    setStatus("正在创建 Agent");
-    try {
-      const response = await fetch(apiUrl("/agents"), {
-        method: "POST",
-        credentials: "include",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name, slug, description: description || null, systemPrompt, visibility }),
-      });
-      const payload = (await response.json()) as AgentChoice & { message?: string };
-      if (!response.ok) throw new Error(payload.message ?? "创建 Agent 失败");
-      setStatus("正在生成 Graph");
-      const graphResponse = await fetch(apiUrl(`/agents/${payload.id}/graph`), {
-        method: "POST",
-        credentials: "include",
-      });
-      const graphPayload = (await graphResponse.json()) as { message?: string };
-      if (!graphResponse.ok) throw new Error(graphPayload.message ?? "Graph 生成失败");
-      setAgents((current) => [payload, ...current]);
-      setName("");
-      setSlug("");
-      setDescription("");
-      setSystemPrompt("");
-      setStatus("Graph 已生成，可以在 Chat 中使用");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "操作失败");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <>
-      <header className="account-heading">
-        <h1>Agent 管理</h1>
-        <p>{status || "租户 Agent"}</p>
-      </header>
-      <div className="agent-admin-layout">
-        <form className="agent-create-form" onSubmit={create}>
-          <label>
-            名称
-            <input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} />
-          </label>
-          <label>
-            Slug
-            <input
-              required
-              pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
-              placeholder="research-agent"
-              value={slug}
-              onChange={(event) => setSlug(event.target.value.toLowerCase())}
-            />
-          </label>
-          <label>
-            可见范围
-            <select value={visibility} onChange={(event) => setVisibility(event.target.value as "private" | "tenant")}>
-              <option value="private">仅自己</option>
-              <option value="tenant">整个租户</option>
-            </select>
-          </label>
-          <label>
-            描述
-            <input maxLength={2000} value={description} onChange={(event) => setDescription(event.target.value)} />
-          </label>
-          <label>
-            System prompt
-            <textarea required value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} />
-          </label>
-          <button disabled={saving} type="submit">
-            <Sparkles /> {saving ? "处理中" : "创建并生成 Graph"}
-          </button>
-        </form>
-        <section className="managed-agent-list">
-          {agents.map((agent) => (
-            <article key={agent.id}>
-              <Bot />
-              <span><strong>{agent.name}</strong><small>{agent.description ?? "Agent"}</small></span>
-              <b>可用</b>
-            </article>
-          ))}
-          {agents.length === 0 && <p className="empty-state">暂无 Agent</p>}
-        </section>
-      </div>
-    </>
-  );
-}
-
 function AccountPanel({
   section,
   user,
@@ -622,7 +517,7 @@ function AccountPanel({
   const [promptName, setPromptName] = useState("");
   const [apiKeys, setApiKeys] = useState<string[]>([]);
   const [name, setName] = useState(user.displayName);
-  if (section === "agents") return <AdminAgents />;
+  if (section === "agents") return <CatalogManager />;
   if (section === "billing")
     return (
       <>
@@ -1115,7 +1010,13 @@ function Chat() {
           body: JSON.stringify({ content }),
         },
       );
-      if (!response.ok || !response.body) throw new Error("Agent 请求失败");
+      if (!response.ok) {
+        const error = (await response.json().catch(() => null)) as {
+          message?: string;
+        } | null;
+        throw new Error(error?.message ?? "Agent 请求失败");
+      }
+      if (!response.body) throw new Error("Agent 请求失败");
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -1131,13 +1032,15 @@ function Chat() {
           const payload = JSON.parse(rawData) as {
             content?: string;
             agent?: string;
+            root?: boolean;
             name?: string;
             status?: string;
             message?: string;
           };
           if (
             eventName === "token" &&
-            payload.agent === "coordinator" &&
+            (payload.root === true ||
+              (payload.root === undefined && payload.agent === "coordinator")) &&
             payload.content
           ) {
             setMessages((current) =>
@@ -1159,6 +1062,11 @@ function Chat() {
       }
       setAgentStatus("");
     } catch (error) {
+      setMessages((current) =>
+        current.at(-1)?.role === "assistant" && !current.at(-1)?.content
+          ? current.slice(0, -1)
+          : current,
+      );
       setAgentStatus(error instanceof Error ? error.message : "发送失败");
     } finally {
       setSending(false);
@@ -1275,12 +1183,33 @@ function Chat() {
         </header>
         <div className="chat-messages">
           {messages.map((message, index) => (
-            <article
-              className={`chat-bubble ${message.role}`}
+            <div
+              className={`chat-message-row ${message.role}`}
               key={`${message.role}-${index}`}
             >
-              {message.content}
-            </article>
+              {message.role === "user" ? (
+                <span
+                  className="chat-message-avatar user-avatar"
+                  aria-label={`${user.displayName} 的头像`}
+                >
+                  {user.avatarUrl ? (
+                    <img src={user.avatarUrl} alt="" />
+                  ) : (
+                    user.displayName.slice(0, 1).toUpperCase()
+                  )}
+                </span>
+              ) : (
+                <span
+                  className="chat-message-avatar agent-avatar"
+                  aria-label={`${selectedAgent?.name ?? "MAIC AI"} 的图标`}
+                >
+                  <AgentMark compact />
+                </span>
+              )}
+              <article className={`chat-message ${message.role}`}>
+                {message.content}
+              </article>
+            </div>
           ))}
           {agentStatus && <p className="chat-sidebar-note">{agentStatus}</p>}
         </div>

@@ -1,5 +1,7 @@
 import asyncio
+import importlib
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 from uuid import UUID
@@ -14,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .config import get_settings
 from .database import get_engine
 from .llm import create_chat_model
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -61,6 +65,20 @@ def _permissions() -> list[FilesystemPermission]:
     ]
 
 
+def _resolve_tool_handler(handler_path: str) -> Any:
+    registered = TOOL_HANDLERS.get(handler_path)
+    if registered is not None:
+        return registered
+    try:
+        module_name, attribute_name = handler_path.rsplit(".", 1)
+        handler = getattr(importlib.import_module(module_name), attribute_name)
+    except (AttributeError, ImportError, ValueError) as error:
+        raise RuntimeError(f"Unsupported Agent tool handler: {handler_path}") from error
+    if not callable(handler):
+        raise RuntimeError(f"Agent tool handler is not callable: {handler_path}")
+    return handler
+
+
 async def _agent_tools(db: AsyncSession, agent_id: UUID) -> list[Any]:
     tools: list[Any] = []
     local_rows = (await db.execute(text("""
@@ -71,10 +89,7 @@ async def _agent_tools(db: AsyncSession, agent_id: UUID) -> list[Any]:
         ORDER BY tools.slug
     """), {"agent_id": agent_id})).mappings()
     for row in local_rows:
-        handler = TOOL_HANDLERS.get(row["handler"])
-        if handler is None:
-            raise RuntimeError(f"Unsupported Agent tool handler: {row['handler']}")
-        tools.append(handler)
+        tools.append(_resolve_tool_handler(row["handler"]))
 
     mcp_rows = (await db.execute(text("""
         SELECT mcp_servers.slug, mcp_servers.transport, mcp_servers.url, mcp_servers.config
@@ -98,20 +113,16 @@ async def _agent_tools(db: AsyncSession, agent_id: UUID) -> list[Any]:
 
 async def get_catalog_agent(
     db: AsyncSession,
-    user_id: UUID,
     target_kind: str,
     target_id: UUID,
 ) -> Any:
     table = "agents" if target_kind == "agent" else "super_agents"
     definition = (await db.execute(text(f"""
-        SELECT resource.*, users.tenant_id AS user_tenant_id
+                SELECT resource.*
         FROM {table} resource
-        JOIN users ON users.id = :user_id
         WHERE resource.id = :target_id
-          AND resource.tenant_id = users.tenant_id
           AND resource.enabled
-          AND (resource.owner_user_id = :user_id OR resource.visibility = 'tenant')
-    """), {"target_id": target_id, "user_id": user_id})).mappings().first()
+        """), {"target_id": target_id})).mappings().first()
     if definition is None:
         raise RuntimeError("Agent does not exist or is not available")
 
@@ -159,6 +170,31 @@ async def get_catalog_agent(
             )
         _agents[cache_key] = graph
         return graph
+
+
+async def warm_catalog_agents(db: AsyncSession) -> tuple[int, int]:
+    definitions = (await db.execute(text("""
+        SELECT id, 'agent' AS kind FROM agents WHERE enabled
+        UNION ALL
+        SELECT id, 'super_agent' AS kind FROM super_agents WHERE enabled
+        ORDER BY kind, id
+    """))).mappings()
+    ready = 0
+    failed = 0
+    for definition in definitions:
+        try:
+            await asyncio.wait_for(
+                get_catalog_agent(db, definition["kind"], definition["id"]),
+                timeout=30,
+            )
+            ready += 1
+        except Exception:
+            failed += 1
+            logger.exception(
+                "Failed to build catalog Agent graph",
+                extra={"agent_id": str(definition["id"]), "agent_kind": definition["kind"]},
+            )
+    return ready, failed
 
 
 async def get_agent(
@@ -239,6 +275,7 @@ async def stream_agent(
     messages: list[dict[str, str]],
     user_id: UUID,
     conversation_id: UUID,
+    root_agent_name: str = "coordinator",
 ) -> AsyncIterator[tuple[str, str]]:
     assistant_content: list[str] = []
     config = {"configurable": {"thread_id": str(conversation_id)}, "recursion_limit": 100}
@@ -256,9 +293,14 @@ async def stream_agent(
             chunk = (event.get("data") or {}).get("chunk")
             text_delta = _text_from_content(getattr(chunk, "content", ""))
             if text_delta:
-                if agent_name == "coordinator":
+                is_root = agent_name == root_agent_name
+                if is_root:
                     assistant_content.append(text_delta)
-                yield "token", _sse("token", {"content": text_delta, "agent": agent_name})
+                yield "token", _sse("token", {
+                    "content": text_delta,
+                    "agent": agent_name,
+                    "root": is_root,
+                })
         elif event_name == "on_tool_start":
             yield "tool", _sse("tool", {"name": event.get("name"), "agent": agent_name, "status": "started"})
         elif event_name == "on_tool_end":

@@ -1,5 +1,5 @@
 from typing import Annotated, Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import bcrypt
 from authlib.integrations.starlette_client import OAuth, OAuthError
@@ -27,16 +27,14 @@ if settings.google_client_id and settings.google_client_secret:
 
 
 USER_QUERY = text("""
-SELECT u.id, u.tenant_id, t.name AS tenant_name, u.role,
-       u.email, u.display_name, u.avatar_url, u.created_at,
+SELECT u.id, u.role, u.email, u.display_name, u.avatar_url, u.created_at,
        (CASE WHEN u.password_hash IS NULL THEN ARRAY[]::text[]
              ELSE ARRAY['credentials']::text[] END) ||
        COALESCE(array_agg(DISTINCT oa.provider) FILTER (WHERE oa.provider IS NOT NULL), ARRAY[]::text[]) providers
 FROM users u
-JOIN tenants t ON t.id = u.tenant_id
 LEFT JOIN oauth_accounts oa ON oa.user_id = u.id
 WHERE u.id = :user_id
-GROUP BY u.id, t.name
+GROUP BY u.id
 """)
 
 
@@ -57,14 +55,6 @@ def set_session(response: Response, user_id: UUID) -> None:
     )
 
 
-async def create_tenant(db: AsyncSession, name: str) -> UUID:
-    tenant_id = uuid4()
-    return (await db.execute(
-        text("INSERT INTO tenants (id, name, slug) VALUES (:id, :name, :slug) RETURNING id"),
-        {"id": tenant_id, "name": f"{name} Workspace", "slug": f"tenant-{tenant_id}"},
-    )).scalar_one()
-
-
 @router.post("/register", response_model=AuthOutput, response_model_by_alias=True)
 async def register(
     data: RegisterInput,
@@ -76,10 +66,9 @@ async def register(
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该邮箱已注册")
     password_hash = bcrypt.hashpw(data.password.encode(), bcrypt.gensalt(rounds=12)).decode()
-    tenant_id = await create_tenant(db, data.display_name)
     user_id = (await db.execute(
-        text("INSERT INTO users (tenant_id, email, display_name, password_hash, role) VALUES (:tenant_id, :email, :name, :password, 'admin') RETURNING id"),
-        {"tenant_id": tenant_id, "email": email, "name": data.display_name, "password": password_hash},
+        text("INSERT INTO users (email, display_name, password_hash, role) VALUES (:email, :name, :password, 'admin') RETURNING id"),
+        {"email": email, "name": data.display_name, "password": password_hash},
     )).scalar_one()
     await db.commit()
     user = await load_user(db, user_id)
@@ -156,10 +145,9 @@ async def google_callback(
         user_id = await db.scalar(text("SELECT id FROM users WHERE email = :email"), {"email": profile["email"].lower()})
         if user_id is None:
             display_name = profile.get("name") or profile["email"].split("@")[0]
-            tenant_id = await create_tenant(db, display_name)
             user_id = (await db.execute(
-                text("INSERT INTO users (tenant_id, email, display_name, avatar_url, role) VALUES (:tenant_id, :email, :name, :avatar, 'admin') RETURNING id"),
-                {"tenant_id": tenant_id, "email": profile["email"].lower(), "name": display_name, "avatar": profile.get("picture")},
+                text("INSERT INTO users (email, display_name, avatar_url, role) VALUES (:email, :name, :avatar, 'admin') RETURNING id"),
+                {"email": profile["email"].lower(), "name": display_name, "avatar": profile.get("picture")},
             )).scalar_one()
         await db.execute(
             text("INSERT INTO oauth_accounts (user_id, provider, provider_account_id) VALUES (:user_id, 'google', :sub)"),

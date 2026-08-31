@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+import logging
 import sys
 
 from fastapi import FastAPI, HTTPException, Request
@@ -7,12 +8,17 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.sessions import SessionMiddleware
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from .agent import warm_catalog_agents
 from .auth import router as auth_router
 from .agent_catalog import router as agent_catalog_router
 from .config import get_settings
 from .conversations import router as conversations_router
+from .database import get_engine
 from .workshops import router as workshops_router
+
+logger = logging.getLogger("uvicorn.error")
 
 if sys.version_info[:2] != (3, 12):
     raise RuntimeError("MAIC AI API requires Python 3.12")
@@ -20,6 +26,10 @@ if sys.version_info[:2] != (3, 12):
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    factory = async_sessionmaker(get_engine(), expire_on_commit=False)
+    async with factory() as db:
+        ready, failed = await warm_catalog_agents(db)
+    logger.info("Catalog Agent graph warm-up complete: %s ready, %s failed", ready, failed)
     yield
 
 
