@@ -912,7 +912,9 @@ function Chat() {
     ({ id, kind }) => `${kind}:${id}` === selectedAgentKey,
   );
   const visibleConversations = conversations.filter(({ title }) =>
-    title.toLocaleLowerCase().includes(conversationSearch.trim().toLocaleLowerCase()),
+    title
+      .toLocaleLowerCase()
+      .includes(conversationSearch.trim().toLocaleLowerCase()),
   );
 
   useEffect(() => {
@@ -1040,7 +1042,8 @@ function Chat() {
           if (
             eventName === "token" &&
             (payload.root === true ||
-              (payload.root === undefined && payload.agent === "coordinator")) &&
+              (payload.root === undefined &&
+                payload.agent === "coordinator")) &&
             payload.content
           ) {
             setMessages((current) =>
@@ -1082,10 +1085,7 @@ function Chat() {
           <strong>MAIC AI</strong>
           <small>Chat 工作台</small>
         </div>
-        <button
-          className="new-chat"
-          onClick={() => beginConversation()}
-        >
+        <button className="new-chat" onClick={() => beginConversation()}>
           <Plus /> 创建新对话
         </button>
         <section className="agent-selector" aria-label="可用 Agent">
@@ -1095,7 +1095,10 @@ function Chat() {
             onClick={() => beginConversation("default")}
           >
             <Bot />
-            <span><strong>MAIC AI</strong><small>默认协调 Agent</small></span>
+            <span>
+              <strong>MAIC AI</strong>
+              <small>默认协调 Agent</small>
+            </span>
           </button>
           {availableAgents.map((agent) => {
             const key = `${agent.kind}:${agent.id}`;
@@ -1109,7 +1112,9 @@ function Chat() {
                 {agent.kind === "super_agent" ? <Sparkles /> : <Bot />}
                 <span>
                   <strong>{agent.name}</strong>
-                  <small>{agent.kind === "super_agent" ? "SuperAgent" : "Agent"}</small>
+                  <small>
+                    {agent.kind === "super_agent" ? "SuperAgent" : "Agent"}
+                  </small>
                 </span>
               </button>
             );
