@@ -7,7 +7,7 @@ from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.agent import _resolve_tool_handler, stream_agent, warm_catalog_agents
+from app.agent import _inject_skill_descriptions, stream_agent, warm_catalog_agents
 
 
 class DefinitionResult:
@@ -27,15 +27,38 @@ class CatalogDb:
 
 
 class StreamingAgent:
+    def __init__(self) -> None:
+        self.inputs = []
+
     async def astream_events(self, *_args, **_kwargs):
+        self.inputs.append(_args[0])
         yield {
             "event": "on_chat_model_stream",
             "metadata": {"lc_agent_name": "custom-agent"},
             "data": {"chunk": SimpleNamespace(content="OK")},
         }
 
-
 class AgentWarmupTests(unittest.IsolatedAsyncioTestCase):
+    def test_injects_assigned_skill_descriptions_into_system_prompt(self) -> None:
+        prompt = _inject_skill_descriptions(
+            "可使用以下技能：\n{{Skills}}",
+            [
+                {"handler": "overdue_account", "description": "查询欠款客户信息"},
+                {"handler": "weather", "description": "查询城市天气"},
+            ],
+        )
+
+        self.assertEqual(
+            prompt,
+            "可使用以下技能：\n1. overdue_account：查询欠款客户信息\n2. weather：查询城市天气",
+        )
+
+    def test_replaces_skill_placeholder_with_empty_text_for_agent_without_skills(self) -> None:
+        self.assertEqual(
+            _inject_skill_descriptions("技能：{{Skills}}", []),
+            "技能：",
+        )
+
     async def test_streams_custom_root_agent_as_final_content(self) -> None:
         events = [
             payload
@@ -51,15 +74,25 @@ class AgentWarmupTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"root": true', events[0])
         self.assertIn('"content": "OK"', events[-1])
 
-    def test_resolves_dotted_python_tool_handler(self) -> None:
-        handler = lambda: None
-        module = SimpleNamespace(user_filter=handler)
+    async def test_passes_complete_message_history_without_reading_checkpoint_state(self) -> None:
+        agent = StreamingAgent()
+        messages = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "second"},
+        ]
 
-        with patch("app.agent.importlib.import_module", return_value=module) as import_module:
-            resolved = _resolve_tool_handler("app.tools.user_filter")
+        _ = [
+            event
+            async for event in stream_agent(
+                agent,
+                messages,
+                uuid4(),
+                uuid4(),
+            )
+        ]
 
-        self.assertIs(resolved, handler)
-        import_module.assert_called_once_with("app.tools")
+        self.assertEqual(agent.inputs[0], {"messages": messages})
 
     async def test_builds_all_catalog_graphs_and_counts_failures(self) -> None:
         agent_id = uuid4()
@@ -68,7 +101,7 @@ class AgentWarmupTests(unittest.IsolatedAsyncioTestCase):
             {"id": agent_id, "kind": "agent"},
             {"id": super_agent_id, "kind": "super_agent"},
         ])
-        build = AsyncMock(side_effect=[object(), RuntimeError("invalid tool")])
+        build = AsyncMock(side_effect=[object(), RuntimeError("invalid Skill")])
 
         with (
             patch("app.agent.get_catalog_agent", build),

@@ -2,7 +2,8 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,16 +15,21 @@ from .schemas import (
     AgentGraphOutput,
     AgentInput,
     AgentOutput,
-    McpServerInput,
-    McpServerOutput,
+    SkillInput,
+    SkillOutput,
     SuperAgentInput,
     SuperAgentOutput,
-    ToolInput,
-    ToolOutput,
 )
+from .runtime.skills import registry as skill_registry
 from .security import require_admin_user_id, require_user_id
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+
+SKILL_JSON_BINDINGS = (
+    bindparam("input_schema", type_=JSONB),
+    bindparam("output_schema", type_=JSONB),
+    bindparam("execution_config", type_=JSONB),
+)
 
 
 @router.get("/catalog", response_model=AgentCatalogOutput, response_model_by_alias=True)
@@ -31,25 +37,19 @@ async def get_agent_catalog(
     _admin_id: Annotated[UUID, Depends(require_admin_user_id)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AgentCatalogOutput:
-    tools = (await db.execute(text("""
-        SELECT id, name, slug, description, handler, enabled
-        FROM tools ORDER BY name
-    """))).mappings()
-    mcp_servers = (await db.execute(text("""
-        SELECT id, name, slug, description, transport, url, enabled
-        FROM mcp_servers ORDER BY name
+    skills = (await db.execute(text("""
+        SELECT id, skill_code, skill_name, description, skill_type, handler,
+               input_schema, output_schema, execution_config, enabled, version
+        FROM skill_registry ORDER BY skill_name
     """))).mappings()
     agents = (await db.execute(text("""
         SELECT agents.id, 'agent' AS kind, agents.name, agents.slug,
                agents.description, agents.system_prompt,
                agents.enabled, 'not_generated' AS graph_status,
-               COALESCE(array_agg(DISTINCT agent_tools.tool_id)
-                   FILTER (WHERE agent_tools.tool_id IS NOT NULL), '{}') AS tool_ids,
-               COALESCE(array_agg(DISTINCT agent_mcp_servers.mcp_server_id)
-                   FILTER (WHERE agent_mcp_servers.mcp_server_id IS NOT NULL), '{}') AS mcp_server_ids
+               COALESCE(array_agg(DISTINCT agent_skills.skill_id)
+                   FILTER (WHERE agent_skills.skill_id IS NOT NULL), '{}') AS skill_ids
         FROM agents
-        LEFT JOIN agent_tools ON agent_tools.agent_id = agents.id
-        LEFT JOIN agent_mcp_servers ON agent_mcp_servers.agent_id = agents.id
+        LEFT JOIN agent_skills ON agent_skills.agent_id = agents.id
         GROUP BY agents.id ORDER BY agents.name
     """))).mappings()
     super_agents = (await db.execute(text("""
@@ -63,80 +63,94 @@ async def get_agent_catalog(
         GROUP BY super_agents.id ORDER BY super_agents.name
     """))).mappings()
     return AgentCatalogOutput.model_validate({
-        "tools": [dict(row) for row in tools],
-        "mcp_servers": [dict(row) for row in mcp_servers],
+        "skills": [dict(row) for row in skills],
+        "skill_handlers": skill_registry.list_handlers(),
         "agents": [dict(row) for row in agents],
         "super_agents": [dict(row) for row in super_agents],
     })
 
 
-async def _save_capability(
-    db: AsyncSession,
-    table: str,
-    data: ToolInput | McpServerInput,
-    resource_id: UUID | None,
-) -> UUID:
-    fields = {
-        "name": data.name,
-        "slug": data.slug,
-        "description": data.description,
-        "enabled": data.enabled,
-    }
-    if isinstance(data, ToolInput):
-        fields["handler"] = data.handler
-    else:
-        fields["transport"] = data.transport
-        fields["url"] = data.url
-    if resource_id:
-        assignments = ", ".join(f"{field} = :{field}" for field in fields)
-        result = await db.execute(text(f"""
-            UPDATE {table} SET {assignments}, updated_at = now()
-            WHERE id = :id RETURNING id
-        """), {**fields, "id": resource_id})
-        saved_id = result.scalar_one_or_none()
-        if not saved_id:
-            raise HTTPException(status_code=404, detail="资源不存在")
-        return saved_id
-    columns = ", ".join(fields)
-    values = ", ".join(f":{field}" for field in fields)
-    return (await db.execute(text(f"""
-        INSERT INTO {table} ({columns})
-        VALUES ({values}) RETURNING id
-    """), fields)).scalar_one()
-
-
-@router.post("/tools", response_model=ToolOutput, response_model_by_alias=True, status_code=201)
-@router.put("/tools/{resource_id}", response_model=ToolOutput, response_model_by_alias=True)
-async def save_tool(
-    data: ToolInput,
-    admin_id: Annotated[UUID, Depends(require_admin_user_id)],
+@router.post("/skills", response_model=SkillOutput, response_model_by_alias=True, status_code=201)
+@router.put("/skills/{resource_id}", response_model=SkillOutput, response_model_by_alias=True)
+async def save_skill(
+    data: SkillInput,
+    _admin_id: Annotated[UUID, Depends(require_admin_user_id)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    resource_id: UUID | None = None,
-) -> ToolOutput:
+    resource_id: int | None = None,
+) -> SkillOutput:
+    if data.handler not in skill_registry.list_handlers():
+        raise HTTPException(status_code=400, detail="Skill handler 不存在")
+    if data.input_schema.get("type") != "object":
+        raise HTTPException(status_code=400, detail="inputSchema 根类型必须是 object")
+    values = data.model_dump()
     try:
-        saved_id = await _save_capability(db, "tools", data, resource_id)
+        if resource_id is None:
+            statement = text("""
+                INSERT INTO skill_registry (
+                    skill_code, skill_name, description, skill_type, handler,
+                    input_schema, output_schema, execution_config, enabled, version
+                ) VALUES (
+                    :skill_code, :skill_name, :description, :skill_type, :handler,
+                    :input_schema, :output_schema, :execution_config, :enabled, :version
+                ) RETURNING id
+            """).bindparams(*SKILL_JSON_BINDINGS)
+            saved_id = (await db.execute(statement, values)).scalar_one()
+        else:
+            statement = text("""
+                UPDATE skill_registry SET
+                    skill_code = :skill_code, skill_name = :skill_name,
+                    description = :description, skill_type = :skill_type,
+                    handler = :handler, input_schema = :input_schema,
+                    output_schema = :output_schema, execution_config = :execution_config,
+                    enabled = :enabled, version = :version, updated_at = now()
+                WHERE id = :id RETURNING id
+            """).bindparams(*SKILL_JSON_BINDINGS)
+            result = await db.execute(statement, {**values, "id": resource_id})
+            saved_id = result.scalar_one_or_none()
+            if saved_id is None:
+                raise HTTPException(status_code=404, detail="Skill 不存在")
+            await db.execute(text("""
+                UPDATE agents SET updated_at = now()
+                FROM agent_skills
+                WHERE agent_skills.agent_id = agents.id
+                  AND agent_skills.skill_id = :skill_id
+            """), {"skill_id": saved_id})
         await db.commit()
     except IntegrityError as error:
         await db.rollback()
-        raise HTTPException(status_code=409, detail="Tool slug 已存在") from error
-    return ToolOutput(id=saved_id, **data.model_dump())
+        raise HTTPException(status_code=409, detail="Skill code 已存在") from error
+    return SkillOutput(id=saved_id, **values)
 
 
-@router.post("/mcp-servers", response_model=McpServerOutput, response_model_by_alias=True, status_code=201)
-@router.put("/mcp-servers/{resource_id}", response_model=McpServerOutput, response_model_by_alias=True)
-async def save_mcp_server(
-    data: McpServerInput,
-    admin_id: Annotated[UUID, Depends(require_admin_user_id)],
+@router.delete("/skills/{resource_id}", status_code=204)
+async def delete_skill(
+    resource_id: int,
+    _admin_id: Annotated[UUID, Depends(require_admin_user_id)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    resource_id: UUID | None = None,
-) -> McpServerOutput:
-    try:
-        saved_id = await _save_capability(db, "mcp_servers", data, resource_id)
-        await db.commit()
-    except IntegrityError as error:
+) -> None:
+    skill_id = (await db.execute(text("""
+        SELECT id FROM skill_registry
+        WHERE id = :id
+        FOR UPDATE
+    """), {"id": resource_id})).scalar_one_or_none()
+    if skill_id is None:
         await db.rollback()
-        raise HTTPException(status_code=409, detail="MCP slug 已存在") from error
-    return McpServerOutput(id=saved_id, **data.model_dump())
+        raise HTTPException(status_code=404, detail="Skill 不存在")
+
+    is_assigned = await db.scalar(text("""
+        SELECT EXISTS (
+            SELECT 1 FROM agent_skills WHERE skill_id = :skill_id
+        )
+    """), {"skill_id": skill_id})
+    if is_assigned:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Skill 已关联 Agent，无法删除")
+
+    await db.execute(
+        text("DELETE FROM skill_registry WHERE id = :id"),
+        {"id": skill_id},
+    )
+    await db.commit()
 
 
 @router.get("/available", response_model=list[AgentChoiceOutput], response_model_by_alias=True)
@@ -160,8 +174,8 @@ async def list_available_agents(
 async def _require_capabilities(
     db: AsyncSession,
     table: str,
-    capability_ids: list[UUID],
-) -> list[UUID]:
+    capability_ids: list[UUID] | list[int],
+) -> list[UUID] | list[int]:
     unique_ids = list(dict.fromkeys(capability_ids))
     for capability_id in unique_ids:
         found = await db.scalar(text(f"""
@@ -169,7 +183,7 @@ async def _require_capabilities(
             WHERE id = :id AND enabled
         """), {"id": capability_id})
         if not found:
-            raise HTTPException(status_code=400, detail="Tool 或 MCP Server 不存在或不可用")
+            raise HTTPException(status_code=400, detail="关联能力不存在或不可用")
     return unique_ids
 
 
@@ -179,8 +193,7 @@ async def create_agent(
     admin_id: Annotated[UUID, Depends(require_admin_user_id)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AgentOutput:
-    tool_ids = await _require_capabilities(db, "tools", data.tool_ids)
-    mcp_server_ids = await _require_capabilities(db, "mcp_servers", data.mcp_server_ids)
+    skill_ids = await _require_capabilities(db, "skill_registry", data.skill_ids)
     try:
         agent_id = (await db.execute(text("""
             INSERT INTO agents (
@@ -197,16 +210,11 @@ async def create_agent(
             "system_prompt": data.system_prompt,
             "enabled": data.enabled,
         })).scalar_one()
-        for tool_id in tool_ids:
+        for skill_id in skill_ids:
             await db.execute(text("""
-                INSERT INTO agent_tools (agent_id, tool_id)
-                VALUES (:agent_id, :tool_id)
-            """), {"agent_id": agent_id, "tool_id": tool_id})
-        for mcp_server_id in mcp_server_ids:
-            await db.execute(text("""
-                INSERT INTO agent_mcp_servers (agent_id, mcp_server_id)
-                VALUES (:agent_id, :mcp_server_id)
-            """), {"agent_id": agent_id, "mcp_server_id": mcp_server_id})
+                INSERT INTO agent_skills (agent_id, skill_id)
+                VALUES (:agent_id, :skill_id)
+            """), {"agent_id": agent_id, "skill_id": skill_id})
         await db.commit()
     except IntegrityError as error:
         await db.rollback()
@@ -219,8 +227,7 @@ async def create_agent(
         "description": data.description,
         "system_prompt": data.system_prompt,
         "enabled": data.enabled,
-        "tool_ids": tool_ids,
-        "mcp_server_ids": mcp_server_ids,
+        "skill_ids": skill_ids,
         "graph_status": "not_generated",
     })
 
@@ -228,21 +235,14 @@ async def create_agent(
 async def _replace_agent_links(
     db: AsyncSession,
     agent_id: UUID,
-    tool_ids: list[UUID],
-    mcp_server_ids: list[UUID],
+    skill_ids: list[int],
 ) -> None:
-    await db.execute(text("DELETE FROM agent_tools WHERE agent_id = :id"), {"id": agent_id})
-    await db.execute(text("DELETE FROM agent_mcp_servers WHERE agent_id = :id"), {"id": agent_id})
-    for tool_id in tool_ids:
+    await db.execute(text("DELETE FROM agent_skills WHERE agent_id = :id"), {"id": agent_id})
+    for skill_id in skill_ids:
         await db.execute(text("""
-            INSERT INTO agent_tools (agent_id, tool_id)
+            INSERT INTO agent_skills (agent_id, skill_id)
             VALUES (:agent_id, :resource_id)
-        """), {"agent_id": agent_id, "resource_id": tool_id})
-    for mcp_server_id in mcp_server_ids:
-        await db.execute(text("""
-            INSERT INTO agent_mcp_servers (agent_id, mcp_server_id)
-            VALUES (:agent_id, :resource_id)
-        """), {"agent_id": agent_id, "resource_id": mcp_server_id})
+        """), {"agent_id": agent_id, "resource_id": skill_id})
 
 
 @router.put("/{agent_id}", response_model=AgentOutput, response_model_by_alias=True)
@@ -252,8 +252,7 @@ async def update_agent(
     admin_id: Annotated[UUID, Depends(require_admin_user_id)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AgentOutput:
-    tool_ids = await _require_capabilities(db, "tools", data.tool_ids)
-    mcp_server_ids = await _require_capabilities(db, "mcp_servers", data.mcp_server_ids)
+    skill_ids = await _require_capabilities(db, "skill_registry", data.skill_ids)
     try:
         result = await db.execute(text("""
             UPDATE agents SET name = :name, slug = :slug, description = :description,
@@ -263,14 +262,14 @@ async def update_agent(
         """), {**data.model_dump(), "id": agent_id})
         if not result.scalar_one_or_none():
             raise HTTPException(status_code=404, detail="Agent 不存在")
-        await _replace_agent_links(db, agent_id, tool_ids, mcp_server_ids)
+        await _replace_agent_links(db, agent_id, skill_ids)
         await db.commit()
     except IntegrityError as error:
         await db.rollback()
         raise HTTPException(status_code=409, detail="Agent slug 已存在") from error
     return AgentOutput.model_validate({
         **data.model_dump(), "id": agent_id, "kind": "agent",
-        "tool_ids": tool_ids, "mcp_server_ids": mcp_server_ids,
+        "skill_ids": skill_ids,
         "graph_status": "not_generated",
     })
 

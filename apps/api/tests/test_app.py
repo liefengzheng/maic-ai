@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from fastapi import HTTPException
 
 from app.main import app
-from app.conversations import _claim_conversation_run
+from app.conversations import _claim_conversation_run, delete_conversation
 from app.security import require_admin_user_id
 
 
@@ -25,6 +25,21 @@ class RunClaimDb:
 
     async def scalar(self, *_args, **_kwargs) -> object:
         return self.claimed_run_id
+
+
+class ConversationDeleteDb:
+    def __init__(self, conversation_id: object) -> None:
+        self.conversation_id = conversation_id
+        self.committed = False
+
+    async def execute(self, *_args, **_kwargs) -> object:
+        return type("Result", (), {"scalar_one_or_none": lambda _: self.conversation_id})()
+
+    async def commit(self) -> None:
+        self.committed = True
+
+    async def rollback(self) -> None:
+        pass
 
 
 class AppSmokeTests(unittest.TestCase):
@@ -73,6 +88,14 @@ class ConversationRunTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(claimed)
+
+    async def test_deletes_a_users_conversation(self) -> None:
+        conversation_id = uuid4()
+        db = ConversationDeleteDb(conversation_id)
+
+        await delete_conversation(conversation_id, uuid4(), db)  # type: ignore[arg-type]
+
+        self.assertTrue(db.committed)
 
 
 if __name__ == "__main__":

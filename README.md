@@ -12,18 +12,16 @@ React + TypeScript + Vite 前端与 Python 3.12 FastAPI API 的 npm workspaces M
 
 ## Agent
 
-- `coordinator`：主 Agent，拆解任务并汇总结果。
-- `researcher`：仅使用 `SEARCH_MCP_URL` 配置的网页搜索 MCP；未配置时不会获得搜索工具。
-- `conversation-analyst`：只能通过参数化只读 Tool 搜索当前登录用户的历史对话。
-- `file-worker`：使用 Deep Agents 的线程级虚拟文件系统，禁止读写 `.env`。
+- `coordinator`：未选择目录 Agent 时使用的基础 Agent。
+- 目录 Agent：由 system prompt 和关联 Skills 动态构建。
 
-用户分为 `admin` 与 `user`。只有 `admin` 可以管理全局 Tool、MCP Server、Agent、SuperAgent 和生成 Graph；所有用户都可以使用全局目录中已启用的 Agent。管理员通过 `POST /agents` 保存 Agent 定义，再通过 `POST /agents/{id}/graph` 验证并生成运行 Graph。
+用户分为 `admin` 与 `user`。只有 `admin` 可以管理全局 Skill、Agent、SuperAgent 和生成 Graph；所有用户都可以使用全局目录中已启用的 Agent。管理员通过 `POST /agents` 保存 Agent 定义，再通过 `POST /agents/{id}/graph` 验证并生成运行 Graph。
 
-Graph 不序列化到数据库。API 根据 Agent 的 system prompt、Tool 与 MCP Server 关系按需编译 Deep Agents Graph；SuperAgent 则把有序成员 Agent 编译为 subagents。Chat 会缓存已编译 Graph，并在 Agent 的 `updated_at` 改变后生成新版本。
+Graph 不序列化到数据库。API 根据 Agent 的 system prompt 与 Skill 关系按需编译 Deep Agents Graph；SuperAgent 则把有序成员 Agent 编译为 subagents。Chat 会缓存已编译 Graph，并在 Agent 的 `updated_at` 改变后生成新版本。
 
-API 启动时会读取所有已启用的 Agent 与 SuperAgent，根据其 Tool/MCP 关联动态生成并缓存 Graph。Tool 的 `handler` 可以使用内置名称，也可以填写 Python callable 的点路径（例如 `app.tools.user_filter`）；单个 Graph 构建失败会记录日志但不会阻止其他 Agent 和 API 启动，每个 Graph 最多等待 30 秒。
+API 启动时会读取所有已启用的 Agent 与 SuperAgent，根据其 Skill 关联动态生成并缓存 Graph。Skill 元数据保存在数据库中，执行逻辑从 `apps/api/app/runtime/skills/<handler>/skill.py` 动态加载；单个 Graph 构建失败会记录日志但不会阻止其他 Agent 和 API 启动，每个 Graph 最多等待 30 秒。
 
-聊天使用 `POST /conversations/{id}/runs` 返回 SSE。事件包括 `token`、`tool`、`done` 和 `error`。普通认证、预约和数据库写入仍由确定性的 FastAPI 服务处理，不交给模型。
+聊天使用 `POST /conversations/{id}/runs` 返回 SSE。事件包括 `token`、`skill`、`done` 和 `error`。普通认证、预约和数据库写入仍由确定性的 FastAPI 服务处理，不交给模型。
 
 ## LLM Adapter
 
@@ -48,8 +46,8 @@ API 启动时会读取所有已启用的 Agent 与 SuperAgent，根据其 Tool/M
 - `workshop_slots`、`workshop_bookings`：工作坊时段和预约。
 - `conversations`、`chat_messages`：Chat 会话与 Markdown 内容。
 - `agents`：管理员设计的全局 Agent，通过 `owner_user_id` 记录创建者。
-- `tools`、`mcp_servers`：可分配给任意 Agent 的全局 Tool 与 MCP Server。
-- `agent_tools`、`agent_mcp_servers`：Agent 与能力的多对多关系。
+- `skill_registry`：全局 Skill 元数据、输入输出 Schema 与执行配置。
+- `agent_skills`：Agent 与 Skill 的多对多关系。
 - `super_agents`、`super_agent_members`：全局 SuperAgent 及其有序的单独 Agent 成员，不能嵌套 SuperAgent。
 
 Google 回调使用 `provider = google` 与不可变的 Google `sub` 查找账户；首次登录会创建用户，已有相同邮箱的本地账户会自动绑定。

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .agent import get_agent, get_catalog_agent, stream_agent
 from .database import get_db
-from .schemas import ChatMessageOutput, ChatRunInput, ConversationInput, ConversationOutput
+from .schemas import ApprovalInput, ChatMessageOutput, ChatRunInput, ConversationInput, ConversationOutput
 from .security import require_user_id
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -87,6 +87,22 @@ async def list_conversations(
     return [ConversationOutput.model_validate(dict(row)) for row in rows]
 
 
+@router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_conversation(
+    conversation_id: UUID,
+    user_id: Annotated[UUID, Depends(require_user_id)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    result = await db.execute(
+        text("DELETE FROM conversations WHERE id = :id AND user_id = :user_id RETURNING id"),
+        {"id": conversation_id, "user_id": user_id},
+    )
+    if result.scalar_one_or_none() is None:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="对话不存在")
+    await db.commit()
+
+
 @router.post("", response_model=ConversationOutput, response_model_by_alias=True, status_code=status.HTTP_201_CREATED)
 async def create_conversation(
     data: ConversationInput,
@@ -136,51 +152,40 @@ async def list_messages(
     return [ChatMessageOutput.model_validate(dict(row)) for row in rows]
 
 
-@router.post("/{conversation_id}/runs")
-async def run_conversation(
+async def _conversation_agent(db: AsyncSession, conversation: dict) -> object:
+    target_id = conversation.get("target_id")
+    if target_id:
+        return await get_catalog_agent(db, conversation["target_kind"], target_id)
+    return await get_agent()
+
+
+async def _pending_approvals(agent: object, conversation_id: UUID) -> list[dict]:
+    return []
+
+
+@router.get("/{conversation_id}/approval")
+async def get_conversation_approval(
     conversation_id: UUID,
-    data: ChatRunInput,
     user_id: Annotated[UUID, Depends(require_user_id)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> StreamingResponse:
+) -> dict[str, list[dict]]:
     conversation = await require_conversation(db, conversation_id, user_id)
     try:
-        target_id = conversation.get("target_id")
-        if target_id:
-            agent = await get_catalog_agent(
-                db,
-                conversation["target_kind"],
-                target_id,
-            )
-        else:
-            agent = await get_agent()
+        agent = await _conversation_agent(db, conversation)
     except RuntimeError as error:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+    return {"requests": await _pending_approvals(agent, conversation_id)}
 
-    run_id = uuid4()
-    if not await _claim_conversation_run(db, conversation_id, run_id):
-        await db.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该对话正在回复，请稍候")
-    try:
-        await db.execute(
-            text("INSERT INTO chat_messages (conversation_id, role, content) VALUES (:id, 'user', :content)"),
-            {"id": conversation_id, "content": data.content},
-        )
-        await db.execute(
-            text("UPDATE conversations SET updated_at = now(), title = CASE WHEN title = '新对话' THEN left(:content, 160) ELSE title END WHERE id = :id"),
-            {"id": conversation_id, "content": data.content},
-        )
-        await db.commit()
-    except Exception:
-        await db.rollback()
-        await _release_conversation_run(db, conversation_id, run_id)
-        raise
-    rows = (await db.execute(
-        text("SELECT role, content FROM chat_messages WHERE conversation_id = :id ORDER BY created_at"),
-        {"id": conversation_id},
-    )).mappings()
-    messages = [{"role": row["role"], "content": row["content"]} for row in rows]
 
+def _stream_response(
+    db: AsyncSession,
+    agent: object,
+    conversation: dict,
+    messages: list[dict[str, str]],
+    user_id: UUID,
+    conversation_id: UUID,
+    run_id: UUID,
+) -> StreamingResponse:
     async def events() -> AsyncIterator[str]:
         final_content = ""
         try:
@@ -216,5 +221,64 @@ async def run_conversation(
     return StreamingResponse(
         events(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@router.post("/{conversation_id}/runs")
+async def run_conversation(
+    conversation_id: UUID,
+    data: ChatRunInput,
+    user_id: Annotated[UUID, Depends(require_user_id)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StreamingResponse:
+    conversation = await require_conversation(db, conversation_id, user_id)
+    try:
+        agent = await _conversation_agent(db, conversation)
+    except RuntimeError as error:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+
+    run_id = uuid4()
+    if not await _claim_conversation_run(db, conversation_id, run_id):
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该对话正在回复，请稍候")
+    try:
+        await db.execute(
+            text("INSERT INTO chat_messages (conversation_id, role, content) VALUES (:id, 'user', :content)"),
+            {"id": conversation_id, "content": data.content},
+        )
+        await db.execute(
+            text("UPDATE conversations SET updated_at = now(), title = CASE WHEN title = '新对话' THEN left(:content, 160) ELSE title END WHERE id = :id"),
+            {"id": conversation_id, "content": data.content},
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        await _release_conversation_run(db, conversation_id, run_id)
+        raise
+    rows = (await db.execute(
+        text("SELECT role, content FROM chat_messages WHERE conversation_id = :id ORDER BY created_at"),
+        {"id": conversation_id},
+    )).mappings()
+    messages = [{"role": row["role"], "content": row["content"]} for row in rows]
+
+    return _stream_response(
+        db, agent, conversation, messages, user_id, conversation_id, run_id
+    )
+
+
+@router.post("/{conversation_id}/runs/resume")
+async def resume_conversation(
+    conversation_id: UUID,
+    data: ApprovalInput,
+    user_id: Annotated[UUID, Depends(require_user_id)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StreamingResponse:
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Checkpoint 已禁用，无法恢复待确认操作",
     )

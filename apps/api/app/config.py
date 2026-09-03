@@ -18,7 +18,6 @@ class Settings(BaseSettings):
     web_origin: str = "http://localhost:5173"
     cookie_secure: bool = False
     llm_provider: str = "azure_openai"
-    search_mcp_url: str = ""
     google_client_id: str = ""
     google_client_secret: str = ""
     google_callback_url: str = ""

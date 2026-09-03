@@ -6,6 +6,7 @@ import {
   Check,
   CircleUserRound,
   CreditCard,
+  Minus,
   Home as HomeIcon,
   KeyRound,
   Lightbulb,
@@ -18,9 +19,9 @@ import {
   Settings,
   Settings2,
   Sparkles,
-  Upload,
+  X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
   Link,
@@ -47,6 +48,17 @@ function AgentMark({ compact = false }: { compact?: boolean }) {
       <Sparkles />
     </span>
   );
+}
+
+interface PendingApproval {
+  id: string;
+  request: {
+    action_requests: Array<{
+      name: string;
+      args: Record<string, unknown>;
+      description?: string;
+    }>;
+  };
 }
 
 function Header() {
@@ -586,7 +598,7 @@ function AccountPanel({
         <div className="account-tabs">
           <button className="active">Chat</button>
           <button>Speech</button>
-          <button>Tool</button>
+          <button>Skills</button>
           <button>Agents</button>
         </div>
         <section className="usage-stats">
@@ -847,7 +859,7 @@ function Workshops() {
           {[
             "先区分 Chat 和 Agent",
             "再搭工作区",
-            "沉淀 Skills 与 MCP",
+            "沉淀可复用 Skills",
             "最后接入远程触发",
           ].map((item) => (
             <article key={item}>
@@ -900,11 +912,20 @@ function Chat() {
   const [availableAgents, setAvailableAgents] = useState<AgentChoice[]>([]);
   const [selectedAgentKey, setSelectedAgentKey] = useState("default");
   const [conversationSearch, setConversationSearch] = useState("");
+  const [conversationPendingDeletion, setConversationPendingDeletion] = useState<{
+    conversation: Conversation;
+    left: number;
+    top: number;
+  } | null>(null);
   const [activeConversationId, setActiveConversationId] = useState<
     string | null
   >(null);
   const [agentStatus, setAgentStatus] = useState("");
   const [sending, setSending] = useState(false);
+  const [pendingApproval, setPendingApproval] =
+    useState<PendingApproval | null>(null);
+  const messagesElement = useRef<HTMLDivElement>(null);
+  const locallyManagedConversationId = useRef<string | null>(null);
   const activeConversation = conversations.find(
     ({ id }) => id === activeConversationId,
   );
@@ -915,7 +936,7 @@ function Chat() {
     title
       .toLocaleLowerCase()
       .includes(conversationSearch.trim().toLocaleLowerCase()),
-  );
+  ).slice(0, 20);
 
   useEffect(() => {
     if (!user) return;
@@ -930,14 +951,6 @@ function Chat() {
       if (agentResponse.ok) {
         setAvailableAgents((await agentResponse.json()) as AgentChoice[]);
       }
-      if (loaded[0]) {
-        setActiveConversationId(loaded[0].id);
-        setSelectedAgentKey(
-          loaded[0].targetId
-            ? `${loaded[0].targetKind}:${loaded[0].targetId}`
-            : "default",
-        );
-      }
     };
     void loadConversations();
   }, [user]);
@@ -945,23 +958,44 @@ function Chat() {
   useEffect(() => {
     if (!activeConversationId) {
       setMessages([]);
+      setPendingApproval(null);
       return;
     }
-    void fetch(apiUrl(`/conversations/${activeConversationId}/messages`), {
-      credentials: "include",
-    })
-      .then((response) => (response.ok ? response.json() : []))
-      .then((loaded: ChatMessage[]) => setMessages(loaded));
+    if (locallyManagedConversationId.current === activeConversationId) return;
+    void Promise.all([
+      fetch(apiUrl(`/conversations/${activeConversationId}/messages`), {
+        credentials: "include",
+      }).then((response) => (response.ok ? response.json() : [])),
+      fetch(apiUrl(`/conversations/${activeConversationId}/approval`), {
+        credentials: "include",
+      }).then((response) =>
+        response.ok ? response.json() : { requests: [] },
+      ),
+    ]).then(([loadedMessages, approval]: [ChatMessage[], { requests: PendingApproval[] }]) => {
+      setMessages(loadedMessages);
+      setPendingApproval(approval.requests[0] ?? null);
+      setAgentStatus(approval.requests.length ? "等待用户确认" : "");
+    });
   }, [activeConversationId]);
 
+  useEffect(() => {
+    messagesElement.current?.scrollTo({
+      top: messagesElement.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [messages, agentStatus, pendingApproval]);
+
   const beginConversation = (agentKey = selectedAgentKey) => {
+    locallyManagedConversationId.current = null;
     setMessages([]);
     setActiveConversationId(null);
     setSelectedAgentKey(agentKey);
     setAgentStatus("");
+    setPendingApproval(null);
   };
 
   const openConversation = (conversation: Conversation) => {
+    locallyManagedConversationId.current = null;
     setActiveConversationId(conversation.id);
     setSelectedAgentKey(
       conversation.targetId
@@ -969,6 +1003,23 @@ function Chat() {
         : "default",
     );
     setAgentStatus("");
+    setPendingApproval(null);
+  };
+
+  const deleteConversation = async (conversation: Conversation) => {
+    const response = await fetch(apiUrl(`/conversations/${conversation.id}`), {
+      method: "DELETE",
+      credentials: "include",
+    });
+    if (!response.ok) {
+      setAgentStatus("删除对话失败");
+      return;
+    }
+    setConversations((current) =>
+      current.filter(({ id }) => id !== conversation.id),
+    );
+    if (activeConversationId === conversation.id) beginConversation();
+    setConversationPendingDeletion(null);
   };
 
   const createConversation = async () => {
@@ -985,8 +1036,75 @@ function Chat() {
     if (!response.ok) throw new Error("创建对话失败");
     const conversation = (await response.json()) as Conversation;
     setConversations((current) => [conversation, ...current]);
+    locallyManagedConversationId.current = conversation.id;
     setActiveConversationId(conversation.id);
     return conversation.id;
+  };
+
+  const consumeRunResponse = async (response: Response) => {
+    if (!response.ok) {
+      const error = (await response.json().catch(() => null)) as {
+        message?: string;
+      } | null;
+      throw new Error(error?.message ?? "Agent 请求失败");
+    }
+    if (!response.body) throw new Error("Agent 请求失败");
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let waitingForApproval = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const events = buffer.split("\n\n");
+      buffer = events.pop() ?? "";
+      for (const event of events) {
+        const eventName = event.match(/^event: (.+)$/m)?.[1];
+        const rawData = event.match(/^data: (.+)$/m)?.[1];
+        if (!rawData) continue;
+        const payload = JSON.parse(rawData) as {
+          content?: string;
+          agent?: string;
+          root?: boolean;
+          name?: string;
+          status?: string;
+          message?: string;
+          requests?: PendingApproval[];
+        };
+        if (
+          eventName === "token" &&
+          (payload.root === true ||
+            (payload.root === undefined && payload.agent === "coordinator")) &&
+          payload.content
+        ) {
+          setMessages((current) =>
+            current.map((message, index) =>
+              index === current.length - 1
+                ? { ...message, content: message.content + payload.content }
+                : message,
+            ),
+          );
+        } else if (eventName === "skill") {
+          setAgentStatus(
+            `${payload.agent}: ${payload.name} ${payload.status === "started" ? "运行中" : "已完成"}`,
+          );
+        } else if (eventName === "approval" && payload.requests?.[0]) {
+          setPendingApproval(payload.requests[0]);
+          setMessages((current) =>
+            current.at(-1)?.role === "assistant" && !current.at(-1)?.content
+              ? current.slice(0, -1)
+              : current,
+          );
+          setAgentStatus("等待用户确认");
+          waitingForApproval = true;
+        } else if (eventName === "error") {
+          throw new Error(payload.message ?? "Agent 执行失败");
+        }
+      }
+      if (done) break;
+    }
+    return waitingForApproval;
   };
 
   const send = async () => {
@@ -1012,58 +1130,7 @@ function Chat() {
           body: JSON.stringify({ content }),
         },
       );
-      if (!response.ok) {
-        const error = (await response.json().catch(() => null)) as {
-          message?: string;
-        } | null;
-        throw new Error(error?.message ?? "Agent 请求失败");
-      }
-      if (!response.body) throw new Error("Agent 请求失败");
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        buffer += decoder.decode(value, { stream: !done });
-        const events = buffer.split("\n\n");
-        buffer = events.pop() ?? "";
-        for (const event of events) {
-          const eventName = event.match(/^event: (.+)$/m)?.[1];
-          const rawData = event.match(/^data: (.+)$/m)?.[1];
-          if (!rawData) continue;
-          const payload = JSON.parse(rawData) as {
-            content?: string;
-            agent?: string;
-            root?: boolean;
-            name?: string;
-            status?: string;
-            message?: string;
-          };
-          if (
-            eventName === "token" &&
-            (payload.root === true ||
-              (payload.root === undefined &&
-                payload.agent === "coordinator")) &&
-            payload.content
-          ) {
-            setMessages((current) =>
-              current.map((message, index) =>
-                index === current.length - 1
-                  ? { ...message, content: message.content + payload.content }
-                  : message,
-              ),
-            );
-          } else if (eventName === "tool") {
-            setAgentStatus(
-              `${payload.agent}: ${payload.name} ${payload.status === "started" ? "运行中" : "已完成"}`,
-            );
-          } else if (eventName === "error") {
-            throw new Error(payload.message ?? "Agent 执行失败");
-          }
-        }
-        if (done) break;
-      }
-      setAgentStatus("");
+      if (!(await consumeRunResponse(response))) setAgentStatus("");
     } catch (error) {
       setMessages((current) =>
         current.at(-1)?.role === "assistant" && !current.at(-1)?.content
@@ -1071,6 +1138,48 @@ function Chat() {
           : current,
       );
       setAgentStatus(error instanceof Error ? error.message : "发送失败");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const respondToApproval = async (decision: "approve" | "reject") => {
+    if (!pendingApproval || !activeConversationId || sending) return;
+    const approval = pendingApproval;
+    setPendingApproval(null);
+    setSending(true);
+    setAgentStatus(decision === "approve" ? "正在执行已批准操作" : "正在处理拒绝结果");
+    setMessages((current) => [
+      ...current,
+      { role: "assistant", content: "" },
+    ]);
+    try {
+      const response = await fetch(
+        apiUrl(`/conversations/${activeConversationId}/runs/resume`),
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            interruptId: approval.id,
+            decisions: approval.request.action_requests.map(() => ({
+              type: decision,
+              ...(decision === "reject"
+                ? { message: "用户拒绝执行此工具操作" }
+                : {}),
+            })),
+          }),
+        },
+      );
+      if (!(await consumeRunResponse(response))) setAgentStatus("");
+    } catch (error) {
+      setMessages((current) =>
+        current.at(-1)?.role === "assistant" && !current.at(-1)?.content
+          ? current.slice(0, -1)
+          : current,
+      );
+      setPendingApproval(approval);
+      setAgentStatus(error instanceof Error ? error.message : "确认失败");
     } finally {
       setSending(false);
     }
@@ -1090,77 +1199,91 @@ function Chat() {
         </button>
         <section className="agent-selector" aria-label="可用 Agent">
           <p className="chat-group-label">可用 Agent</p>
-          <button
-            className={`agent-option${selectedAgentKey === "default" ? " active" : ""}`}
-            onClick={() => beginConversation("default")}
-          >
-            <Bot />
-            <span>
-              <strong>MAIC AI</strong>
-              <small>默认协调 Agent</small>
-            </span>
-          </button>
-          {availableAgents.map((agent) => {
-            const key = `${agent.kind}:${agent.id}`;
-            return (
-              <button
-                className={`agent-option${selectedAgentKey === key ? " active" : ""}`}
-                key={key}
-                title={agent.description ?? agent.name}
-                onClick={() => beginConversation(key)}
-              >
-                {agent.kind === "super_agent" ? <Sparkles /> : <Bot />}
-                <span>
-                  <strong>{agent.name}</strong>
-                  <small>
-                    {agent.kind === "super_agent" ? "SuperAgent" : "Agent"}
-                  </small>
-                </span>
-              </button>
-            );
-          })}
-        </section>
-        <p className="chat-group-label history-label">历史记录</p>
-        <label className="chat-search">
-          <Search />
-          <input
-            value={conversationSearch}
-            onChange={(event) => setConversationSearch(event.target.value)}
-            placeholder="搜索对话..."
-          />
-        </label>
-        <div className="conversation-list">
-          {visibleConversations.map((conversation) => (
+          <div className="agent-options">
             <button
-              className={`conversation${conversation.id === activeConversationId ? " active" : ""}`}
-              key={conversation.id}
-              title={conversation.targetName ?? "MAIC AI"}
-              onClick={() => openConversation(conversation)}
+              className={`agent-option${selectedAgentKey === "default" ? " active" : ""}`}
+              onClick={() => beginConversation("default")}
             >
-              {conversation.title}
+              <Bot />
+              <span>
+                <strong>MAIC AI</strong>
+                <small>默认协调 Agent</small>
+              </span>
             </button>
-          ))}
-          {visibleConversations.length === 0 && (
-            <p className="chat-sidebar-note">
-              {conversationSearch ? "没有匹配的对话" : "还没有历史对话"}
-            </p>
-          )}
-        </div>
+            {availableAgents.map((agent) => {
+              const key = `${agent.kind}:${agent.id}`;
+              return (
+                <button
+                  className={`agent-option${selectedAgentKey === key ? " active" : ""}`}
+                  key={key}
+                  title={agent.description ?? agent.name}
+                  onClick={() => beginConversation(key)}
+                >
+                  {agent.kind === "super_agent" ? <Sparkles /> : <Bot />}
+                  <span>
+                    <strong>{agent.name}</strong>
+                    <small>
+                      {agent.kind === "super_agent" ? "SuperAgent" : "Agent"}
+                    </small>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+        <section className="chat-history" aria-label="历史记录">
+          <p className="chat-group-label history-label">历史记录</p>
+          <label className="chat-search">
+            <Search />
+            <input
+              value={conversationSearch}
+              onChange={(event) => setConversationSearch(event.target.value)}
+              placeholder="搜索对话..."
+            />
+          </label>
+          <div className="conversation-list">
+            {visibleConversations.map((conversation) => (
+              <div
+                className={`conversation${conversation.id === activeConversationId ? " active" : ""}`}
+                key={conversation.id}
+              >
+                <button
+                  className="conversation-open"
+                  title={conversation.targetName ?? "MAIC AI"}
+                  onClick={() => openConversation(conversation)}
+                >
+                  {conversation.title}
+                </button>
+                <button
+                  className="conversation-delete"
+                  aria-label={`删除对话：${conversation.title}`}
+                  title="删除对话"
+                  onClick={(event) => {
+                    const icon = event.currentTarget.getBoundingClientRect();
+                    setConversationPendingDeletion({
+                      conversation,
+                      left: icon.right + 8,
+                      top: icon.top + icon.height / 2,
+                    });
+                  }}
+                >
+                  <Minus />
+                </button>
+              </div>
+            ))}
+            {visibleConversations.length === 0 && (
+              <p className="chat-sidebar-note">
+                {conversationSearch ? "没有匹配的对话" : "还没有历史对话"}
+              </p>
+            )}
+          </div>
+        </section>
         <div className="chat-sidebar-bottom">
           <Link to="/">
             <HomeIcon /> 官网首页
           </Link>
           <Link to="/account">
             <CircleUserRound /> 个人中心
-          </Link>
-          <Link to="/account">
-            <CreditCard /> 订阅与计费
-          </Link>
-          <button>
-            <Upload /> 导入对话
-          </button>
-          <Link to="/changelog">
-            <MessageSquareText /> 更新日志
           </Link>
           <div className="chat-user">
             <span>{user.displayName.slice(0, 1).toUpperCase()}</span>
@@ -1174,6 +1297,30 @@ function Chat() {
           </div>
         </div>
       </aside>
+      {conversationPendingDeletion && (
+        <div
+          className="conversation-delete-confirm"
+          role="dialog"
+          aria-label="对话历史删除确认"
+          style={{
+            left: conversationPendingDeletion.left,
+            top: conversationPendingDeletion.top,
+          }}
+        >
+          <strong>对话历史删除确认</strong>
+          <span>删除“{conversationPendingDeletion.conversation.title}”？</span>
+          <div>
+            <button
+              onClick={() =>
+                void deleteConversation(conversationPendingDeletion.conversation)
+              }
+            >
+              Yes
+            </button>
+            <button onClick={() => setConversationPendingDeletion(null)}>No</button>
+          </div>
+        </div>
+      )}
       <section className="chat-main">
         <header className="chat-topbar">
           <h1>{activeConversation?.title ?? "新对话"}</h1>
@@ -1186,7 +1333,7 @@ function Chat() {
             </span>
           </div>
         </header>
-        <div className="chat-messages">
+        <div className="chat-messages" ref={messagesElement}>
           {messages.map((message, index) => (
             <div
               className={`chat-message-row ${message.role}`}
@@ -1216,7 +1363,50 @@ function Chat() {
               </article>
             </div>
           ))}
-          {agentStatus && <p className="chat-sidebar-note">{agentStatus}</p>}
+          {pendingApproval && (
+            <section className="approval-panel" aria-label="工具操作确认">
+              <header>
+                <AgentMark compact />
+                <div>
+                  <strong>Agent 请求执行工具</strong>
+                  <small>确认后才会继续执行</small>
+                </div>
+              </header>
+              {pendingApproval.request.action_requests.map((action, index) => (
+                <div className="approval-request" key={`${action.name}-${index}`}>
+                  <strong>{action.name}</strong>
+                  {action.description && <p>{action.description}</p>}
+                  <pre>{JSON.stringify(action.args, null, 2)}</pre>
+                </div>
+              ))}
+              <footer>
+                <button
+                  className="approval-reject"
+                  onClick={() => void respondToApproval("reject")}
+                  disabled={sending}
+                >
+                  <X /> 拒绝
+                </button>
+                <button
+                  className="approval-approve"
+                  onClick={() => void respondToApproval("approve")}
+                  disabled={sending}
+                >
+                  <Check /> 批准并继续
+                </button>
+              </footer>
+            </section>
+          )}
+          {agentStatus && (
+            <p className="chat-sidebar-note agent-status">
+              {agentStatus}
+              {agentStatus === "正在思考" && (
+                <span className="thinking-dots" aria-label="正在加载">
+                  <i>.</i><i>.</i><i>.</i>
+                </span>
+              )}
+            </p>
+          )}
         </div>
         <div className="chat-composer">
           <textarea

@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -67,28 +68,21 @@ class AgentChoiceOutput(ApiModel):
     system_prompt: str = Field(alias="systemPrompt")
 
 
-class CapabilityInput(ApiModel):
-    name: str = Field(min_length=1, max_length=120)
-    slug: str = Field(min_length=1, max_length=160, pattern="^[a-z0-9]+(?:-[a-z0-9]+)*$")
-    description: str | None = Field(default=None, max_length=2000)
+class SkillInput(ApiModel):
+    skill_code: str = Field(alias="skillCode", min_length=1, max_length=100, pattern="^[a-z][a-z0-9_]*$")
+    skill_name: str = Field(alias="skillName", min_length=1, max_length=200)
+    description: str = Field(min_length=1, max_length=2000)
+    skill_type: Literal["local"] = Field(default="local", alias="skillType")
+    handler: str = Field(min_length=1, max_length=100, pattern="^[a-z][a-z0-9_]*$")
+    input_schema: dict[str, Any] = Field(alias="inputSchema")
+    output_schema: dict[str, Any] = Field(default_factory=dict, alias="outputSchema")
+    execution_config: dict[str, Any] = Field(default_factory=dict, alias="executionConfig")
     enabled: bool = True
+    version: str = Field(min_length=1, max_length=20)
 
 
-class ToolInput(CapabilityInput):
-    handler: str = Field(min_length=1, max_length=255)
-
-
-class ToolOutput(ToolInput):
-    id: UUID
-
-
-class McpServerInput(CapabilityInput):
-    transport: str = Field(default="http", pattern="^(http|sse)$")
-    url: str = Field(min_length=1, max_length=4000)
-
-
-class McpServerOutput(McpServerInput):
-    id: UUID
+class SkillOutput(SkillInput):
+    id: int
 
 
 class AgentInput(ApiModel):
@@ -97,15 +91,13 @@ class AgentInput(ApiModel):
     description: str | None = Field(default=None, max_length=2000)
     system_prompt: str = Field(alias="systemPrompt", min_length=1, max_length=50000)
     enabled: bool = True
-    tool_ids: list[UUID] = Field(default_factory=list, alias="toolIds")
-    mcp_server_ids: list[UUID] = Field(default_factory=list, alias="mcpServerIds")
+    skill_ids: list[int] = Field(default_factory=list, alias="skillIds")
 
 
 class AgentOutput(AgentChoiceOutput):
     slug: str
     enabled: bool
-    tool_ids: list[UUID] = Field(default_factory=list, alias="toolIds")
-    mcp_server_ids: list[UUID] = Field(default_factory=list, alias="mcpServerIds")
+    skill_ids: list[int] = Field(default_factory=list, alias="skillIds")
     graph_status: str = Field(alias="graphStatus")
 
 
@@ -125,8 +117,8 @@ class SuperAgentOutput(AgentChoiceOutput):
 
 
 class AgentCatalogOutput(ApiModel):
-    tools: list[ToolOutput]
-    mcp_servers: list[McpServerOutput] = Field(alias="mcpServers")
+    skills: list[SkillOutput]
+    skill_handlers: list[str] = Field(alias="skillHandlers")
     agents: list[AgentOutput]
     super_agents: list[SuperAgentOutput] = Field(alias="superAgents")
 
@@ -145,3 +137,13 @@ class ChatMessageOutput(ApiModel):
 
 class ChatRunInput(ApiModel):
     content: str = Field(min_length=1, max_length=50000)
+
+
+class ApprovalDecisionInput(ApiModel):
+    type: Literal["approve", "reject"]
+    message: str | None = Field(default=None, max_length=2000)
+
+
+class ApprovalInput(ApiModel):
+    interrupt_id: str = Field(alias="interruptId", min_length=1, max_length=255)
+    decisions: list[ApprovalDecisionInput] = Field(min_length=1)

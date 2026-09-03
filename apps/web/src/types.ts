@@ -51,31 +51,25 @@ export interface AgentChoice {
   systemPrompt: string;
 }
 
-export interface ToolDefinition {
-  id: string;
-  name: string;
-  slug: string;
-  description: string | null;
+export interface SkillDefinition {
+  id: number;
+  skillCode: string;
+  skillName: string;
+  description: string;
+  skillType: "local";
   handler: string;
+  inputSchema: Record<string, unknown>;
+  outputSchema: Record<string, unknown>;
+  executionConfig: Record<string, unknown>;
   enabled: boolean;
-}
-
-export interface McpServerDefinition {
-  id: string;
-  name: string;
-  slug: string;
-  description: string | null;
-  transport: "http" | "sse";
-  url: string;
-  enabled: boolean;
+  version: string;
 }
 
 export interface ManagedAgent extends AgentChoice {
   kind: "agent";
   slug: string;
   enabled: boolean;
-  toolIds: string[];
-  mcpServerIds: string[];
+  skillIds: number[];
   graphStatus: string;
 }
 
@@ -87,8 +81,8 @@ export interface SuperAgent extends AgentChoice {
 }
 
 export interface AgentCatalog {
-  tools: ToolDefinition[];
-  mcpServers: McpServerDefinition[];
+  skills: SkillDefinition[];
+  skillHandlers: string[];
   agents: ManagedAgent[];
   superAgents: SuperAgent[];
 }

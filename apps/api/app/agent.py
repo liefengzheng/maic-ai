@@ -1,21 +1,19 @@
 import asyncio
-import importlib
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 from uuid import UUID
 
 from deepagents import create_deep_agent
 from deepagents.middleware.filesystem import FilesystemPermission
-from langchain.tools import ToolRuntime, tool
-from langchain_mcp_adapters.client import MultiServerMCPClient
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import get_settings
-from .database import get_engine
 from .llm import create_chat_model
+from .runtime.skills import SkillDefinition, registry as skill_registry
 
 logger = logging.getLogger(__name__)
 
@@ -26,33 +24,20 @@ class AgentContext:
     conversation_id: str
 
 
-@tool
-async def search_my_conversations(
-    query: str,
-    runtime: ToolRuntime[AgentContext],
-) -> str:
-    """Search the current user's previous chat messages for relevant context."""
-    factory = async_sessionmaker(get_engine(), expire_on_commit=False)
-    async with factory() as db:
-        rows = (await db.execute(text("""
-            SELECT c.title, m.role, m.content, m.created_at
-            FROM chat_messages m
-            JOIN conversations c ON c.id = m.conversation_id
-            WHERE c.user_id = :user_id AND m.content ILIKE :query
-            ORDER BY m.created_at DESC
-            LIMIT 20
-        """), {"user_id": UUID(runtime.context.user_id), "query": f"%{query}%"})).mappings()
-        matches = [dict(row) for row in rows]
-    return json.dumps(matches, ensure_ascii=False, default=str)
-
-
 _agents: dict[str, Any] = {}
 _agent_lock = asyncio.Lock()
+SKILLS_PLACEHOLDER = "{{Skills}}"
 
-TOOL_HANDLERS = {
-    "search_my_conversations": search_my_conversations,
-    "app.agent.search_my_conversations": search_my_conversations,
-}
+
+def _inject_skill_descriptions(
+    system_prompt: str,
+    skill_rows: list[dict[str, Any]],
+) -> str:
+    descriptions = "\n".join(
+        f"{index}. {skill['handler']}：{skill['description']}"
+        for index, skill in enumerate(skill_rows, start=1)
+    )
+    return system_prompt.replace(SKILLS_PLACEHOLDER, descriptions)
 
 
 def _permissions() -> list[FilesystemPermission]:
@@ -62,53 +47,41 @@ def _permissions() -> list[FilesystemPermission]:
             paths=["/**/.env", "/**/.env.*"],
             mode="deny",
         ),
+        FilesystemPermission(
+            operations=["write"],
+            paths=["/**"],
+            mode="interrupt",
+        ),
     ]
 
 
-def _resolve_tool_handler(handler_path: str) -> Any:
-    registered = TOOL_HANDLERS.get(handler_path)
-    if registered is not None:
-        return registered
-    try:
-        module_name, attribute_name = handler_path.rsplit(".", 1)
-        handler = getattr(importlib.import_module(module_name), attribute_name)
-    except (AttributeError, ImportError, ValueError) as error:
-        raise RuntimeError(f"Unsupported Agent tool handler: {handler_path}") from error
-    if not callable(handler):
-        raise RuntimeError(f"Agent tool handler is not callable: {handler_path}")
-    return handler
+async def _agent_skills(
+    db: AsyncSession,
+    agent_id: UUID,
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    skills: list[Any] = []
+    skill_rows = list((await db.execute(text("""
+        SELECT skill_registry.skill_code, skill_registry.skill_name,
+               skill_registry.description, skill_registry.handler,
+               skill_registry.input_schema, skill_registry.output_schema,
+               skill_registry.execution_config
+        FROM agent_skills
+        JOIN skill_registry ON skill_registry.id = agent_skills.skill_id
+        WHERE agent_skills.agent_id = :agent_id AND skill_registry.enabled
+        ORDER BY skill_registry.skill_code
+    """), {"agent_id": agent_id})).mappings())
+    for row in skill_rows:
+        skills.append(skill_registry.as_langchain_tool(SkillDefinition(
+            code=row["skill_code"],
+            name=row["skill_name"],
+            description=row["description"],
+            handler=row["handler"],
+            input_schema=row["input_schema"],
+            output_schema=row["output_schema"],
+            execution_config=row["execution_config"],
+        )))
 
-
-async def _agent_tools(db: AsyncSession, agent_id: UUID) -> list[Any]:
-    tools: list[Any] = []
-    local_rows = (await db.execute(text("""
-        SELECT tools.handler
-        FROM agent_tools
-        JOIN tools ON tools.id = agent_tools.tool_id
-        WHERE agent_tools.agent_id = :agent_id AND tools.enabled
-        ORDER BY tools.slug
-    """), {"agent_id": agent_id})).mappings()
-    for row in local_rows:
-        tools.append(_resolve_tool_handler(row["handler"]))
-
-    mcp_rows = (await db.execute(text("""
-        SELECT mcp_servers.slug, mcp_servers.transport, mcp_servers.url, mcp_servers.config
-        FROM agent_mcp_servers
-        JOIN mcp_servers ON mcp_servers.id = agent_mcp_servers.mcp_server_id
-        WHERE agent_mcp_servers.agent_id = :agent_id AND mcp_servers.enabled
-        ORDER BY mcp_servers.slug
-    """), {"agent_id": agent_id})).mappings().all()
-    if mcp_rows:
-        connections = {
-            row["slug"]: {
-                **(row["config"] or {}),
-                "transport": row["transport"],
-                "url": row["url"],
-            }
-            for row in mcp_rows
-        }
-        tools.extend(await MultiServerMCPClient(connections).get_tools())
-    return tools
+    return skills, [dict(row) for row in skill_rows]
 
 
 async def get_catalog_agent(
@@ -134,12 +107,15 @@ async def get_catalog_agent(
             return _agents[cache_key]
         model = create_chat_model(get_settings())
         if target_kind == "agent":
+            skills, skill_rows = await _agent_skills(db, target_id)
             graph = create_deep_agent(
                 name=definition["slug"],
                 model=model,
                 context_schema=AgentContext,
-                system_prompt=definition["system_prompt"],
-                tools=await _agent_tools(db, target_id),
+                system_prompt=_inject_skill_descriptions(
+                    definition["system_prompt"], skill_rows
+                ),
+                tools=skills,
                 permissions=_permissions(),
             )
         else:
@@ -154,11 +130,14 @@ async def get_catalog_agent(
                 raise RuntimeError("SuperAgent must contain at least one enabled Agent")
             subagents = []
             for member in members:
+                skills, skill_rows = await _agent_skills(db, member["id"])
                 subagents.append({
                     "name": member["slug"],
                     "description": member["description"] or member["name"],
-                    "system_prompt": member["system_prompt"],
-                    "tools": await _agent_tools(db, member["id"]),
+                    "system_prompt": _inject_skill_descriptions(
+                        member["system_prompt"], skill_rows
+                    ),
+                    "tools": skills,
                 })
             graph = create_deep_agent(
                 name=definition["slug"],
@@ -208,46 +187,15 @@ async def get_agent(
             return _agents[cache_key]
         settings = get_settings()
 
-        search_tools: list[Any] = []
-        if settings.search_mcp_url:
-            client = MultiServerMCPClient({
-                "search": {
-                    "transport": "http",
-                    "url": settings.search_mcp_url,
-                }
-            })
-            search_tools = await client.get_tools()
-
         model = create_chat_model(settings)
         agent = create_deep_agent(
             name="coordinator",
             model=model,
             context_schema=AgentContext,
             system_prompt=system_prompt or (
-                "你是 MAIC AI 协调 Agent。直接回答简单问题。复杂研究任务委派给 researcher，"
-                "需要查找用户历史对话时委派给 conversation-analyst，需要处理或生成文件时委派给 file-worker。"
+                "你是 MAIC AI 协调 Agent。直接回答用户问题。"
                 "不得猜测工具结果，不得泄露其他用户数据。最终使用用户的语言简洁汇总。"
             ),
-            subagents=[
-                {
-                    "name": "researcher",
-                    "description": "使用已配置的网页搜索 MCP 进行多步事实研究并给出来源。",
-                    "system_prompt": "你是研究代理。仅根据搜索结果作答，标明来源；没有搜索工具时明确说明。返回精炼结论。",
-                    "tools": search_tools,
-                },
-                {
-                    "name": "conversation-analyst",
-                    "description": "仅在需要回顾当前用户以往对话时使用。",
-                    "system_prompt": "你是历史对话分析代理。只使用受控工具检索当前用户数据，返回相关摘要，不输出无关原文。",
-                    "tools": [search_my_conversations],
-                },
-                {
-                    "name": "file-worker",
-                    "description": "在对话隔离的虚拟文件系统中整理、读取或生成文件。",
-                    "system_prompt": "你是文件处理代理。仅操作虚拟工作区，不尝试访问宿主机、环境变量或凭据。返回文件路径和简要说明。",
-                    "tools": [],
-                },
-            ],
             permissions=_permissions(),
         )
         _agents[cache_key] = agent
@@ -278,10 +226,12 @@ async def stream_agent(
     root_agent_name: str = "coordinator",
 ) -> AsyncIterator[tuple[str, str]]:
     assistant_content: list[str] = []
+    started_at = time.monotonic()
     config = {"configurable": {"thread_id": str(conversation_id)}, "recursion_limit": 100}
     context = AgentContext(user_id=str(user_id), conversation_id=str(conversation_id))
+    graph_input: Any = {"messages": messages}
     async for event in agent.astream_events(
-        {"messages": messages},
+        graph_input,
         config=config,
         context=context,
         version="v2",
@@ -296,13 +246,21 @@ async def stream_agent(
                 is_root = agent_name == root_agent_name
                 if is_root:
                     assistant_content.append(text_delta)
+                    logger.info(
+                        "Agent token chunk emitted",
+                        extra={
+                            "agent": agent_name,
+                            "characters": len(text_delta),
+                            "elapsed_seconds": round(time.monotonic() - started_at, 3),
+                        },
+                    )
                 yield "token", _sse("token", {
                     "content": text_delta,
                     "agent": agent_name,
                     "root": is_root,
                 })
         elif event_name == "on_tool_start":
-            yield "tool", _sse("tool", {"name": event.get("name"), "agent": agent_name, "status": "started"})
+            yield "skill", _sse("skill", {"name": event.get("name"), "agent": agent_name, "status": "started"})
         elif event_name == "on_tool_end":
-            yield "tool", _sse("tool", {"name": event.get("name"), "agent": agent_name, "status": "completed"})
+            yield "skill", _sse("skill", {"name": event.get("name"), "agent": agent_name, "status": "completed"})
     yield "done", _sse("done", {"content": "".join(assistant_content)})

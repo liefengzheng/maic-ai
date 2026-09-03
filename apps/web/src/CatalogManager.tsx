@@ -1,53 +1,67 @@
-import { Bot, Check, Plus, Server, Users, Wrench } from "lucide-react";
+import {
+  Bot,
+  Check,
+  Plus,
+  Sparkles,
+  Trash2,
+  Users,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { apiUrl } from "./api";
 import type {
   AgentCatalog,
   ManagedAgent,
-  McpServerDefinition,
+  SkillDefinition,
   SuperAgent,
-  ToolDefinition,
 } from "./types";
 
-type CatalogSection = "tools" | "mcpServers" | "agents" | "superAgents";
+type CatalogSection = "skills" | "agents" | "superAgents";
 type CatalogResource =
-  ToolDefinition | McpServerDefinition | ManagedAgent | SuperAgent;
+  | SkillDefinition
+  | ManagedAgent
+  | SuperAgent;
 
 interface CatalogDraft {
   name: string;
   slug: string;
   description: string;
   handler: string;
-  transport: "http" | "sse";
-  url: string;
+  version: string;
+  inputSchema: string;
+  outputSchema: string;
+  executionConfig: string;
   systemPrompt: string;
   enabled: boolean;
-  toolIds: string[];
-  mcpServerIds: string[];
+  skillIds: number[];
   agentIds: string[];
 }
+
+type JsonDraftField = "inputSchema" | "outputSchema" | "executionConfig";
 
 const emptyDraft = (): CatalogDraft => ({
   name: "",
   slug: "",
   description: "",
   handler: "",
-  transport: "http",
-  url: "",
+  version: "1.0",
+  inputSchema:
+    '{\n  "type": "object",\n  "properties": {},\n  "required": [],\n  "additionalProperties": false\n}',
+  outputSchema: "{}",
+  executionConfig: "{}",
   systemPrompt: "",
   enabled: true,
-  toolIds: [],
-  mcpServerIds: [],
+  skillIds: [],
   agentIds: [],
 });
 
 export function CatalogManager() {
   const [catalog, setCatalog] = useState<AgentCatalog | null>(null);
   const [section, setSection] = useState<CatalogSection>("agents");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | number | null>(null);
   const [draft, setDraft] = useState<CatalogDraft>(emptyDraft);
   const [status, setStatus] = useState("");
+  const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
 
   const loadCatalog = async () => {
@@ -74,6 +88,7 @@ export function CatalogManager() {
     setSelectedId(null);
     setDraft(emptyDraft());
     setStatus("");
+    setFormError("");
   };
 
   const editResource = (resource: CatalogResource) => {
@@ -81,13 +96,25 @@ export function CatalogManager() {
     setDraft({
       ...emptyDraft(),
       ...resource,
+      name: "skillName" in resource ? resource.skillName : resource.name,
+      slug: "skillCode" in resource ? resource.skillCode : resource.slug,
       description: resource.description ?? "",
       handler: "handler" in resource ? resource.handler : "",
-      transport: "transport" in resource ? resource.transport : "http",
-      url: "url" in resource ? resource.url : "",
+      version: "version" in resource ? resource.version : "1.0",
+      inputSchema:
+        "inputSchema" in resource
+          ? JSON.stringify(resource.inputSchema, null, 2)
+          : emptyDraft().inputSchema,
+      outputSchema:
+        "outputSchema" in resource
+          ? JSON.stringify(resource.outputSchema, null, 2)
+          : "{}",
+      executionConfig:
+        "executionConfig" in resource
+          ? JSON.stringify(resource.executionConfig, null, 2)
+          : "{}",
       systemPrompt: "systemPrompt" in resource ? resource.systemPrompt : "",
-      toolIds: "toolIds" in resource ? resource.toolIds : [],
-      mcpServerIds: "mcpServerIds" in resource ? resource.mcpServerIds : [],
+      skillIds: "skillIds" in resource ? resource.skillIds : [],
       agentIds: "agentIds" in resource ? resource.agentIds : [],
     });
   };
@@ -97,10 +124,10 @@ export function CatalogManager() {
     if (saving) return;
     setSaving(true);
     setStatus("正在保存");
+    setFormError("");
     try {
       const endpoints: Record<CatalogSection, string> = {
-        tools: "/agents/tools",
-        mcpServers: "/agents/mcp-servers",
+        skills: "/agents/skills",
         agents: "/agents",
         superAgents: "/agents/super",
       };
@@ -110,30 +137,46 @@ export function CatalogManager() {
         description: draft.description || null,
         enabled: draft.enabled,
       };
-      const bodies: Record<CatalogSection, object> = {
-        tools: { ...base, handler: draft.handler },
-        mcpServers: { ...base, transport: draft.transport, url: draft.url },
-        agents: {
+      let body: object;
+      if (section === "skills") {
+        try {
+          body = {
+            skillCode: draft.slug,
+            skillName: draft.name,
+            description: draft.description,
+            skillType: "local",
+            handler: draft.handler,
+            inputSchema: JSON.parse(draft.inputSchema) as unknown,
+            outputSchema: JSON.parse(draft.outputSchema) as unknown,
+            executionConfig: JSON.parse(draft.executionConfig) as unknown,
+            enabled: draft.enabled,
+            version: draft.version,
+          };
+        } catch {
+          throw new Error("Schema 或 Execution Config 不是有效的 JSON");
+        }
+      } else if (section === "agents") {
+        body = {
           ...base,
           systemPrompt: draft.systemPrompt,
-          toolIds: draft.toolIds,
-          mcpServerIds: draft.mcpServerIds,
-        },
-        superAgents: {
+          skillIds: draft.skillIds,
+        };
+      } else {
+        body = {
           ...base,
           systemPrompt: draft.systemPrompt,
           agentIds: draft.agentIds,
-        },
-      };
+        };
+      }
       const suffix = selectedId ? `/${selectedId}` : "";
       const response = await fetch(apiUrl(`${endpoints[section]}${suffix}`), {
         method: selectedId ? "PUT" : "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(bodies[section]),
+        body: JSON.stringify(body),
       });
       const payload = (await response.json()) as {
-        id?: string;
+        id?: string | number;
         message?: string;
       };
       if (!response.ok || !payload.id)
@@ -142,38 +185,84 @@ export function CatalogManager() {
       setSelectedId(payload.id);
       setStatus("已保存");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "操作失败");
+      const message = error instanceof Error ? error.message : "操作失败";
+      setStatus(message);
+      setFormError(message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteSkill = async () => {
+    if (section !== "skills" || typeof selectedId !== "number" || saving)
+      return;
+    if (!window.confirm("确定删除这个 Skill？")) return;
+
+    setSaving(true);
+    setStatus("正在删除");
+    try {
+      const response = await fetch(apiUrl(`/agents/skills/${selectedId}`), {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!response.ok) {
+        const payload = (await response.json()) as { message?: string };
+        throw new Error(payload.message ?? "删除失败");
+      }
+      await loadCatalog();
+      setSelectedId(null);
+      setDraft(emptyDraft());
+      setStatus("已删除");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "删除失败");
     } finally {
       setSaving(false);
     }
   };
 
   const resources: CatalogResource[] = catalog?.[section] ?? [];
-  const toggleId = (
-    field: "toolIds" | "mcpServerIds" | "agentIds",
-    id: string,
-  ) => {
+  const selectedSkillIsAssigned =
+    section === "skills" &&
+    typeof selectedId === "number" &&
+    (catalog?.agents.some((agent) => agent.skillIds.includes(selectedId)) ??
+      false);
+  const toggleAgentId = (id: string) => {
     setDraft((current) => ({
       ...current,
-      [field]: current[field].includes(id)
-        ? current[field].filter((value) => value !== id)
-        : [...current[field], id],
+      agentIds: current.agentIds.includes(id)
+        ? current.agentIds.filter((value) => value !== id)
+        : [...current.agentIds, id],
     }));
   };
 
-  const options = (
-    items: Array<ToolDefinition | McpServerDefinition | ManagedAgent>,
-    field: "toolIds" | "mcpServerIds" | "agentIds",
-    emptyText: string,
-  ) =>
+  const toggleSkillId = (id: number) => {
+    setDraft((current) => ({
+      ...current,
+      skillIds: current.skillIds.includes(id)
+        ? current.skillIds.filter((value) => value !== id)
+        : [...current.skillIds, id],
+    }));
+  };
+
+  const formatJsonField = (field: JsonDraftField) => {
+    try {
+      const formatted = JSON.stringify(JSON.parse(draft[field]), null, 2);
+      setDraft((current) => ({ ...current, [field]: formatted }));
+      setFormError("");
+    } catch {
+      setFormError("JSON 格式无效，请检查括号、引号和逗号");
+    }
+  };
+
+  const agentOptions = (items: ManagedAgent[]) =>
     items.length ? (
       <div className="catalog-options">
         {items.map((item) => (
           <label key={item.id}>
             <input
               type="checkbox"
-              checked={draft[field].includes(item.id)}
-              onChange={() => toggleId(field, item.id)}
+              checked={draft.agentIds.includes(item.id)}
+              onChange={() => toggleAgentId(item.id)}
             />
             <span>
               <strong>{item.name}</strong>
@@ -183,7 +272,7 @@ export function CatalogManager() {
         ))}
       </div>
     ) : (
-      <p className="catalog-empty">{emptyText}</p>
+      <p className="catalog-empty">暂无 Agent</p>
     );
 
   const basicFields = (
@@ -198,10 +287,14 @@ export function CatalogManager() {
         />
       </label>
       <label>
-        Slug
+        {section === "skills" ? "Skill Code" : "Slug"}
         <input
           required
-          pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
+          pattern={
+            section === "skills"
+              ? "[a-z][a-z0-9_]*"
+              : "[a-z0-9]+(?:-[a-z0-9]+)*"
+          }
           value={draft.slug}
           onChange={(event) =>
             setDraft({ ...draft, slug: event.target.value.toLowerCase() })
@@ -233,13 +326,11 @@ export function CatalogManager() {
   );
 
   const title =
-    section === "tools"
-      ? "Tool 基本信息"
-      : section === "mcpServers"
-        ? "MCP 基本信息"
-        : section === "agents"
-          ? "Agent 基本信息"
-          : "Super Agent 基本信息";
+    section === "skills"
+      ? "Skill 基本信息"
+      : section === "agents"
+        ? "Agent 基本信息"
+        : "Super Agent 基本信息";
 
   return (
     <>
@@ -249,16 +340,10 @@ export function CatalogManager() {
       </header>
       <div className="catalog-tabs" role="tablist">
         <button
-          className={section === "tools" ? "active" : ""}
-          onClick={() => chooseSection("tools")}
+          className={section === "skills" ? "active" : ""}
+          onClick={() => chooseSection("skills")}
         >
-          <Wrench /> Tools
-        </button>
-        <button
-          className={section === "mcpServers" ? "active" : ""}
-          onClick={() => chooseSection("mcpServers")}
-        >
-          <Server /> MCPs
+          <Sparkles /> Skills
         </button>
         <button
           className={section === "agents" ? "active" : ""}
@@ -279,6 +364,7 @@ export function CatalogManager() {
           onClick={() => {
             setSelectedId(null);
             setDraft(emptyDraft());
+            setFormError("");
           }}
         >
           <Plus /> 新建
@@ -289,60 +375,87 @@ export function CatalogManager() {
             className={selectedId === resource.id ? "active" : ""}
             onClick={() => editResource(resource)}
           >
-            {resource.name}
+            {"skillName" in resource ? resource.skillName : resource.name}
           </button>
         ))}
       </div>
       <form
-        className={`catalog-editor ${section === "tools" || section === "mcpServers" ? "single" : ""}`}
+        className={`catalog-editor ${section === "skills" ? "skill-editor" : ""}`}
         onSubmit={save}
       >
-        <section className="catalog-panel agent-create-form">
+        <section className={`catalog-panel agent-create-form ${section === "skills" ? "skill-form" : ""}`}>
           <h2>{title}</h2>
-          {basicFields}
-          {section === "tools" && (
-            <label>
-              Handler
-              <input
-                required
-                value={draft.handler}
-                onChange={(event) =>
-                  setDraft({ ...draft, handler: event.target.value })
-                }
-                placeholder="app.tools.search"
-              />
-            </label>
+          {section === "skills" && (
+            <div className="skill-form-columns">
+              <div className="skill-form-details">
+                {basicFields}
+                <label>
+                  Handler
+                  <select
+                    required
+                    value={draft.handler}
+                    onChange={(event) =>
+                      setDraft({ ...draft, handler: event.target.value })
+                    }
+                  >
+                    <option value="">请选择 Skill</option>
+                    {(catalog?.skillHandlers ?? []).map((handler) => (
+                      <option key={handler} value={handler}>
+                        {handler}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  版本
+                  <input
+                    required
+                    maxLength={20}
+                    value={draft.version}
+                    onChange={(event) =>
+                      setDraft({ ...draft, version: event.target.value })
+                    }
+                  />
+                </label>
+              </div>
+              <div className="skill-form-schemas">
+                <label>
+                  Input Schema
+                  <textarea
+                    required
+                    value={draft.inputSchema}
+                    onBlur={() => formatJsonField("inputSchema")}
+                    onChange={(event) =>
+                      setDraft({ ...draft, inputSchema: event.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  Output Schema
+                  <textarea
+                    required
+                    value={draft.outputSchema}
+                    onBlur={() => formatJsonField("outputSchema")}
+                    onChange={(event) =>
+                      setDraft({ ...draft, outputSchema: event.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  Execution Config
+                  <textarea
+                    required
+                    value={draft.executionConfig}
+                    onBlur={() => formatJsonField("executionConfig")}
+                    onChange={(event) =>
+                      setDraft({ ...draft, executionConfig: event.target.value })
+                    }
+                  />
+                </label>
+              </div>
+            </div>
           )}
-          {section === "mcpServers" && (
-            <>
-              <label>
-                Transport
-                <select
-                  value={draft.transport}
-                  onChange={(event) =>
-                    setDraft({
-                      ...draft,
-                      transport: event.target.value as "http" | "sse",
-                    })
-                  }
-                >
-                  <option value="http">HTTP</option>
-                  <option value="sse">SSE</option>
-                </select>
-              </label>
-              <label>
-                URL
-                <input
-                  required
-                  type="url"
-                  value={draft.url}
-                  onChange={(event) =>
-                    setDraft({ ...draft, url: event.target.value })
-                  }
-                />
-              </label>
-            </>
-          )}
+          {section !== "skills" && basicFields}
           {(section === "agents" || section === "superAgents") && (
             <label>
               System prompt
@@ -355,19 +468,51 @@ export function CatalogManager() {
               />
             </label>
           )}
-          <button disabled={saving} type="submit">
-            <Check /> {saving ? "保存中" : "保存"}
-          </button>
+          {formError && <p className="catalog-form-error">{formError}</p>}
+          <div className="catalog-form-actions">
+            <button disabled={saving} type="submit">
+              <Check /> {saving ? "保存中" : "保存"}
+            </button>
+            {section === "skills" && selectedId !== null && (
+              <button
+                className="danger"
+                disabled={saving || selectedSkillIsAssigned}
+                title={
+                  selectedSkillIsAssigned
+                    ? "该 Skill 已关联 Agent，无法删除"
+                    : "删除 Skill"
+                }
+                type="button"
+                onClick={() => void deleteSkill()}
+              >
+                <Trash2 /> 删除
+              </button>
+            )}
+          </div>
         </section>
         {section === "agents" && (
           <section className="catalog-panel capability-panel">
             <div>
-              <h2>Tools</h2>
-              {options(catalog?.tools ?? [], "toolIds", "暂无 Tool")}
-            </div>
-            <div>
-              <h2>MCPs</h2>
-              {options(catalog?.mcpServers ?? [], "mcpServerIds", "暂无 MCP")}
+              <h2>Skills</h2>
+              {(catalog?.skills ?? []).length ? (
+                <div className="catalog-options">
+                  {(catalog?.skills ?? []).map((skill) => (
+                    <label key={skill.id}>
+                      <input
+                        type="checkbox"
+                        checked={draft.skillIds.includes(skill.id)}
+                        onChange={() => toggleSkillId(skill.id)}
+                      />
+                      <span>
+                        <strong>{skill.skillName}</strong>
+                        <small>{skill.description || skill.skillCode}</small>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <p className="catalog-empty">暂无 Skill</p>
+              )}
             </div>
           </section>
         )}
@@ -375,7 +520,7 @@ export function CatalogManager() {
           <section className="catalog-panel capability-panel">
             <div>
               <h2>Agents</h2>
-              {options(catalog?.agents ?? [], "agentIds", "暂无 Agent")}
+              {agentOptions(catalog?.agents ?? [])}
             </div>
           </section>
         )}
