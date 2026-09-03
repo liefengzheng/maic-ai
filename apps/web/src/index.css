@@ -1639,7 +1639,8 @@ footer span {
   animation-delay: 0.3s;
 }
 @keyframes thinking-dot {
-  0%, 100% {
+  0%,
+  100% {
     transform: translateY(0);
   }
   50% {

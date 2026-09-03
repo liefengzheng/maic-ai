@@ -912,11 +912,12 @@ function Chat() {
   const [availableAgents, setAvailableAgents] = useState<AgentChoice[]>([]);
   const [selectedAgentKey, setSelectedAgentKey] = useState("default");
   const [conversationSearch, setConversationSearch] = useState("");
-  const [conversationPendingDeletion, setConversationPendingDeletion] = useState<{
-    conversation: Conversation;
-    left: number;
-    top: number;
-  } | null>(null);
+  const [conversationPendingDeletion, setConversationPendingDeletion] =
+    useState<{
+      conversation: Conversation;
+      left: number;
+      top: number;
+    } | null>(null);
   const [activeConversationId, setActiveConversationId] = useState<
     string | null
   >(null);
@@ -932,11 +933,13 @@ function Chat() {
   const selectedAgent = availableAgents.find(
     ({ id, kind }) => `${kind}:${id}` === selectedAgentKey,
   );
-  const visibleConversations = conversations.filter(({ title }) =>
-    title
-      .toLocaleLowerCase()
-      .includes(conversationSearch.trim().toLocaleLowerCase()),
-  ).slice(0, 20);
+  const visibleConversations = conversations
+    .filter(({ title }) =>
+      title
+        .toLocaleLowerCase()
+        .includes(conversationSearch.trim().toLocaleLowerCase()),
+    )
+    .slice(0, 20);
 
   useEffect(() => {
     if (!user) return;
@@ -968,14 +971,17 @@ function Chat() {
       }).then((response) => (response.ok ? response.json() : [])),
       fetch(apiUrl(`/conversations/${activeConversationId}/approval`), {
         credentials: "include",
-      }).then((response) =>
-        response.ok ? response.json() : { requests: [] },
-      ),
-    ]).then(([loadedMessages, approval]: [ChatMessage[], { requests: PendingApproval[] }]) => {
-      setMessages(loadedMessages);
-      setPendingApproval(approval.requests[0] ?? null);
-      setAgentStatus(approval.requests.length ? "等待用户确认" : "");
-    });
+      }).then((response) => (response.ok ? response.json() : { requests: [] })),
+    ]).then(
+      ([loadedMessages, approval]: [
+        ChatMessage[],
+        { requests: PendingApproval[] },
+      ]) => {
+        setMessages(loadedMessages);
+        setPendingApproval(approval.requests[0] ?? null);
+        setAgentStatus(approval.requests.length ? "等待用户确认" : "");
+      },
+    );
   }, [activeConversationId]);
 
   useEffect(() => {
@@ -1148,11 +1154,10 @@ function Chat() {
     const approval = pendingApproval;
     setPendingApproval(null);
     setSending(true);
-    setAgentStatus(decision === "approve" ? "正在执行已批准操作" : "正在处理拒绝结果");
-    setMessages((current) => [
-      ...current,
-      { role: "assistant", content: "" },
-    ]);
+    setAgentStatus(
+      decision === "approve" ? "正在执行已批准操作" : "正在处理拒绝结果",
+    );
+    setMessages((current) => [...current, { role: "assistant", content: "" }]);
     try {
       const response = await fetch(
         apiUrl(`/conversations/${activeConversationId}/runs/resume`),
@@ -1312,12 +1317,16 @@ function Chat() {
           <div>
             <button
               onClick={() =>
-                void deleteConversation(conversationPendingDeletion.conversation)
+                void deleteConversation(
+                  conversationPendingDeletion.conversation,
+                )
               }
             >
               Yes
             </button>
-            <button onClick={() => setConversationPendingDeletion(null)}>No</button>
+            <button onClick={() => setConversationPendingDeletion(null)}>
+              No
+            </button>
           </div>
         </div>
       )}
@@ -1373,7 +1382,10 @@ function Chat() {
                 </div>
               </header>
               {pendingApproval.request.action_requests.map((action, index) => (
-                <div className="approval-request" key={`${action.name}-${index}`}>
+                <div
+                  className="approval-request"
+                  key={`${action.name}-${index}`}
+                >
                   <strong>{action.name}</strong>
                   {action.description && <p>{action.description}</p>}
                   <pre>{JSON.stringify(action.args, null, 2)}</pre>
@@ -1402,7 +1414,9 @@ function Chat() {
               {agentStatus}
               {agentStatus === "正在思考" && (
                 <span className="thinking-dots" aria-label="正在加载">
-                  <i>.</i><i>.</i><i>.</i>
+                  <i>.</i>
+                  <i>.</i>
+                  <i>.</i>
                 </span>
               )}
             </p>
