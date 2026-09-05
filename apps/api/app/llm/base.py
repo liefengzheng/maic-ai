@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import ClassVar
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -21,6 +22,17 @@ class StandardLlmSettings(ProviderSettings):
     model: str = ""
     api_key: str = ""
     base_url: str = ""
+
+
+@dataclass(frozen=True)
+class LlmModelConfig:
+    provider: str
+    model: str
+    api_key: str
+    connection_config: dict[str, str] = field(default_factory=dict)
+
+    def connection(self, key: str) -> str:
+        return self.connection_config.get(key, "")
 
 
 def normalize_provider(provider: str) -> str:
@@ -50,7 +62,7 @@ class LlmAdapter(ABC):
 
     @classmethod
     @abstractmethod
-    def create(cls) -> BaseChatModel:
+    def create(cls, config: LlmModelConfig) -> BaseChatModel:
         """Create a LangChain chat model for this provider."""
 
     @classmethod

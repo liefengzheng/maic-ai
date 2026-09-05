@@ -15,6 +15,7 @@ from .auth import router as auth_router
 from .agent_catalog import router as agent_catalog_router
 from .config import get_settings
 from .conversations import router as conversations_router
+from .model_catalog import bootstrap_legacy_model, get_model, router as model_catalog_router, warm_available_models
 from .database import get_engine
 from .workshops import router as workshops_router
 
@@ -28,7 +29,15 @@ if sys.version_info[:2] != (3, 12):
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     factory = async_sessionmaker(get_engine(), expire_on_commit=False)
     async with factory() as db:
-        ready, failed = await warm_catalog_agents(db)
+        await bootstrap_legacy_model(db)
+        models_ready, models_failed = await warm_available_models(db)
+        default_model = await get_model(db, None)
+        ready, failed = await warm_catalog_agents(
+            db,
+            default_model.config,
+            f"{default_model.id}:{default_model.updated_at}",
+        )
+    logger.info("LLM model warm-up complete: %s ready, %s failed", models_ready, models_failed)
     logger.info("Catalog Agent graph warm-up complete: %s ready, %s failed", ready, failed)
     yield
 
@@ -45,6 +54,7 @@ app.add_middleware(
 )
 app.include_router(auth_router)
 app.include_router(agent_catalog_router)
+app.include_router(model_catalog_router)
 app.include_router(conversations_router)
 app.include_router(workshops_router)
 

@@ -2,7 +2,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import AzureChatOpenAI
 from pydantic_settings import SettingsConfigDict
 
-from ..base import LlmAdapter, ProviderSettings
+from ..base import LlmAdapter, LlmModelConfig, ProviderSettings
 
 
 class AzureOpenAiSettings(ProviderSettings):
@@ -18,19 +18,20 @@ class AzureOpenAiAdapter(LlmAdapter):
     provider_names = ("azure_openai",)
 
     @classmethod
-    def create(cls) -> BaseChatModel:
-        settings = AzureOpenAiSettings()
+    def create(cls, config: LlmModelConfig) -> BaseChatModel:
+        endpoint = config.connection("endpoint") or config.connection("baseUrl")
+        deployment = config.connection("deployment") or config.model
         cls.require(
             cls.provider_names[0],
-            AZURE_OPENAI_ENDPOINT=settings.endpoint,
-            AZURE_OPENAI_API_KEY=settings.api_key,
-            AZURE_OPENAI_DEPLOYMENT=settings.deployment,
+            AZURE_OPENAI_ENDPOINT=endpoint,
+            AZURE_OPENAI_API_KEY=config.api_key,
+            AZURE_OPENAI_DEPLOYMENT=deployment,
         )
         return AzureChatOpenAI(
-            azure_endpoint=settings.endpoint,
-            api_key=settings.api_key,
-            api_version=settings.api_version,
-            azure_deployment=settings.deployment,
+            azure_endpoint=endpoint,
+            api_key=config.api_key,
+            api_version=config.connection("apiVersion") or "2024-10-21",
+            azure_deployment=deployment,
             streaming=True,
             max_retries=2,
         )

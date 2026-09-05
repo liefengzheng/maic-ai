@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .agent import get_agent, get_catalog_agent, stream_agent
 from .database import get_db
+from .model_catalog import get_model
 from .schemas import ApprovalInput, ChatMessageOutput, ChatRunInput, ConversationInput, ConversationOutput
 from .security import require_user_id
 
@@ -58,10 +59,12 @@ SELECT c.id, c.title, c.created_at, c.updated_at,
        COALESCE(c.agent_id, c.super_agent_id) AS target_id,
        COALESCE(a.name, s.name) AS target_name,
     COALESCE(a.slug, s.slug) AS target_slug,
+    m.id AS model_id, m.name AS model_name,
        COALESCE(a.system_prompt, s.system_prompt) AS system_prompt
 FROM conversations c
 LEFT JOIN agents a ON a.id = c.agent_id
 LEFT JOIN super_agents s ON s.id = c.super_agent_id
+JOIN llm_models m ON m.id = c.model_id
 """
 
 
@@ -125,13 +128,17 @@ async def create_conversation(
             agent_id = data.target_id
         else:
             super_agent_id = data.target_id
+    try:
+        model = await get_model(db, data.model_id)
+    except RuntimeError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
     row = (await db.execute(
         text("""
-            INSERT INTO conversations (user_id, title, agent_id, super_agent_id)
-            VALUES (:user_id, :title, :agent_id, :super_agent_id)
+            INSERT INTO conversations (user_id, title, agent_id, super_agent_id, model_id)
+            VALUES (:user_id, :title, :agent_id, :super_agent_id, :model_id)
             RETURNING id
         """),
-        {"user_id": user_id, "title": data.title, "agent_id": agent_id, "super_agent_id": super_agent_id},
+        {"user_id": user_id, "title": data.title, "agent_id": agent_id, "super_agent_id": super_agent_id, "model_id": model.id},
     )).scalar_one()
     await db.commit()
     created = await require_conversation(db, row, user_id)
@@ -153,10 +160,14 @@ async def list_messages(
 
 
 async def _conversation_agent(db: AsyncSession, conversation: dict) -> object:
+    model = await get_model(db, conversation["model_id"])
+    model_cache_key = f"{model.id}:{model.updated_at}"
     target_id = conversation.get("target_id")
     if target_id:
-        return await get_catalog_agent(db, conversation["target_kind"], target_id)
-    return await get_agent()
+        return await get_catalog_agent(
+            db, conversation["target_kind"], target_id, model.config, model_cache_key
+        )
+    return await get_agent(model.config, f"default:{model_cache_key}")
 
 
 async def _pending_approvals(agent: object, conversation_id: UUID) -> list[dict]:

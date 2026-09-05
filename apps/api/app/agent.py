@@ -11,8 +11,7 @@ from deepagents.middleware.filesystem import FilesystemPermission
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import get_settings
-from .llm import create_chat_model
+from .llm import LlmModelConfig, create_chat_model
 from .runtime.skills import SkillDefinition, registry as skill_registry
 
 logger = logging.getLogger(__name__)
@@ -88,6 +87,8 @@ async def get_catalog_agent(
     db: AsyncSession,
     target_kind: str,
     target_id: UUID,
+    model_config: LlmModelConfig,
+    model_cache_key: str,
 ) -> Any:
     table = "agents" if target_kind == "agent" else "super_agents"
     definition = (await db.execute(text(f"""
@@ -99,13 +100,13 @@ async def get_catalog_agent(
     if definition is None:
         raise RuntimeError("Agent does not exist or is not available")
 
-    cache_key = f"{target_kind}:{target_id}:{definition['updated_at'].isoformat()}"
+    cache_key = f"{target_kind}:{target_id}:{definition['updated_at'].isoformat()}:{model_cache_key}"
     if cache_key in _agents:
         return _agents[cache_key]
     async with _agent_lock:
         if cache_key in _agents:
             return _agents[cache_key]
-        model = create_chat_model(get_settings())
+        model = create_chat_model(model_config)
         if target_kind == "agent":
             skills, skill_rows = await _agent_skills(db, target_id)
             graph = create_deep_agent(
@@ -151,7 +152,11 @@ async def get_catalog_agent(
         return graph
 
 
-async def warm_catalog_agents(db: AsyncSession) -> tuple[int, int]:
+async def warm_catalog_agents(
+    db: AsyncSession,
+    model_config: LlmModelConfig,
+    model_cache_key: str,
+) -> tuple[int, int]:
     definitions = (await db.execute(text("""
         SELECT id, 'agent' AS kind FROM agents WHERE enabled
         UNION ALL
@@ -163,7 +168,13 @@ async def warm_catalog_agents(db: AsyncSession) -> tuple[int, int]:
     for definition in definitions:
         try:
             await asyncio.wait_for(
-                get_catalog_agent(db, definition["kind"], definition["id"]),
+                get_catalog_agent(
+                    db,
+                    definition["kind"],
+                    definition["id"],
+                    model_config,
+                    model_cache_key,
+                ),
                 timeout=30,
             )
             ready += 1
@@ -177,7 +188,8 @@ async def warm_catalog_agents(db: AsyncSession) -> tuple[int, int]:
 
 
 async def get_agent(
-    cache_key: str = "default",
+    model_config: LlmModelConfig,
+    cache_key: str,
     system_prompt: str | None = None,
 ) -> Any:
     if cache_key in _agents:
@@ -185,9 +197,7 @@ async def get_agent(
     async with _agent_lock:
         if cache_key in _agents:
             return _agents[cache_key]
-        settings = get_settings()
-
-        model = create_chat_model(settings)
+        model = create_chat_model(model_config)
         agent = create_deep_agent(
             name="coordinator",
             model=model,

@@ -3,8 +3,7 @@ from pkgutil import iter_modules
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
-from ..config import Settings
-from .base import LlmAdapter
+from .base import LlmAdapter, LlmModelConfig
 
 _adapters_loaded = False
 
@@ -21,7 +20,7 @@ def _load_adapters() -> None:
     _adapters_loaded = True
 
 
-def create_chat_model(settings: Settings) -> BaseChatModel:
+def create_chat_model(config: LlmModelConfig) -> BaseChatModel:
     _load_adapters()
-    adapter = LlmAdapter.for_provider(settings.llm_provider)
-    return adapter.create()
+    adapter = LlmAdapter.for_provider(config.provider)
+    return adapter.create(config)

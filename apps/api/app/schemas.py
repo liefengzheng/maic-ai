@@ -48,6 +48,7 @@ class ConversationInput(ApiModel):
     title: str = Field(default="新对话", min_length=1, max_length=160)
     target_kind: str | None = Field(default=None, alias="targetKind", pattern="^(agent|super_agent)$")
     target_id: UUID | None = Field(default=None, alias="targetId")
+    model_id: UUID | None = Field(default=None, alias="modelId")
 
 
 class ConversationOutput(ApiModel):
@@ -56,6 +57,8 @@ class ConversationOutput(ApiModel):
     target_kind: str | None = Field(alias="targetKind")
     target_id: UUID | None = Field(alias="targetId")
     target_name: str | None = Field(alias="targetName")
+    model_id: UUID = Field(alias="modelId")
+    model_name: str = Field(alias="modelName")
     created_at: datetime = Field(alias="createdAt")
     updated_at: datetime = Field(alias="updatedAt")
 
@@ -66,6 +69,13 @@ class AgentChoiceOutput(ApiModel):
     name: str
     description: str | None
     system_prompt: str = Field(alias="systemPrompt")
+
+
+class LlmModelOutput(ApiModel):
+    id: UUID
+    name: str
+    provider: str
+    model: str
 
 
 class SkillInput(ApiModel):

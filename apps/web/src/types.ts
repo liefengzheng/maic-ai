@@ -37,8 +37,17 @@ export interface Conversation {
   targetKind: AgentKind | null;
   targetId: string | null;
   targetName: string | null;
+  modelId: string;
+  modelName: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface LlmModel {
+  id: string;
+  name: string;
+  provider: string;
+  model: string;
 }
 
 export type AgentKind = "agent" | "super_agent";

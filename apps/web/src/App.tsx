@@ -35,7 +35,13 @@ import { apiUrl } from "./api";
 import { CatalogManager } from "./CatalogManager";
 import { capabilities, changelog, scenes } from "./content";
 import { authResolvedAtom, userAtom } from "./state";
-import type { AgentChoice, ChatMessage, Conversation, User } from "./types";
+import type {
+  AgentChoice,
+  ChatMessage,
+  Conversation,
+  LlmModel,
+  User,
+} from "./types";
 import { loginSchema, registerSchema } from "./validation";
 
 function AgentMark({ compact = false }: { compact?: boolean }) {
@@ -911,6 +917,8 @@ function Chat() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [availableAgents, setAvailableAgents] = useState<AgentChoice[]>([]);
   const [selectedAgentKey, setSelectedAgentKey] = useState("default");
+  const [availableModels, setAvailableModels] = useState<LlmModel[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState("");
   const [conversationSearch, setConversationSearch] = useState("");
   const [conversationPendingDeletion, setConversationPendingDeletion] =
     useState<{
@@ -944,15 +952,22 @@ function Chat() {
   useEffect(() => {
     if (!user) return;
     const loadConversations = async () => {
-      const [conversationResponse, agentResponse] = await Promise.all([
-        fetch(apiUrl("/conversations"), { credentials: "include" }),
-        fetch(apiUrl("/agents/available"), { credentials: "include" }),
-      ]);
+      const [conversationResponse, agentResponse, modelResponse] =
+        await Promise.all([
+          fetch(apiUrl("/conversations"), { credentials: "include" }),
+          fetch(apiUrl("/agents/available"), { credentials: "include" }),
+          fetch(apiUrl("/models/available"), { credentials: "include" }),
+        ]);
       if (!conversationResponse.ok) return;
       const loaded = (await conversationResponse.json()) as Conversation[];
       setConversations(loaded);
       if (agentResponse.ok) {
         setAvailableAgents((await agentResponse.json()) as AgentChoice[]);
+      }
+      if (modelResponse.ok) {
+        const models = (await modelResponse.json()) as LlmModel[];
+        setAvailableModels(models);
+        setSelectedModelId((current) => current || models[0]?.id || "");
       }
     };
     void loadConversations();
@@ -1008,6 +1023,7 @@ function Chat() {
         ? `${conversation.targetKind}:${conversation.targetId}`
         : "default",
     );
+    setSelectedModelId(conversation.modelId);
     setAgentStatus("");
     setPendingApproval(null);
   };
@@ -1037,6 +1053,7 @@ function Chat() {
         title: "新对话",
         targetKind: selectedAgent?.kind ?? null,
         targetId: selectedAgent?.id ?? null,
+        modelId: selectedModelId || null,
       }),
     });
     if (!response.ok) throw new Error("创建对话失败");
@@ -1194,48 +1211,9 @@ function Chat() {
   return (
     <main className="chat-workspace">
       <aside className="chat-sidebar">
-        <div className="chat-brand">
-          <AgentMark compact />
-          <strong>MAIC AI</strong>
-          <small>Chat 工作台</small>
-        </div>
         <button className="new-chat" onClick={() => beginConversation()}>
           <Plus /> 创建新对话
         </button>
-        <section className="agent-selector" aria-label="可用 Agent">
-          <p className="chat-group-label">可用 Agent</p>
-          <div className="agent-options">
-            <button
-              className={`agent-option${selectedAgentKey === "default" ? " active" : ""}`}
-              onClick={() => beginConversation("default")}
-            >
-              <Bot />
-              <span>
-                <strong>MAIC AI</strong>
-                <small>默认协调 Agent</small>
-              </span>
-            </button>
-            {availableAgents.map((agent) => {
-              const key = `${agent.kind}:${agent.id}`;
-              return (
-                <button
-                  className={`agent-option${selectedAgentKey === key ? " active" : ""}`}
-                  key={key}
-                  title={agent.description ?? agent.name}
-                  onClick={() => beginConversation(key)}
-                >
-                  {agent.kind === "super_agent" ? <Sparkles /> : <Bot />}
-                  <span>
-                    <strong>{agent.name}</strong>
-                    <small>
-                      {agent.kind === "super_agent" ? "SuperAgent" : "Agent"}
-                    </small>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </section>
         <section className="chat-history" aria-label="历史记录">
           <p className="chat-group-label history-label">历史记录</p>
           <label className="chat-search">
@@ -1442,11 +1420,41 @@ function Chat() {
               <Lightbulb />
             </button>
             <span>0%</span>
-            <div className="model-picker-anchor">
-              <span className="model-select">
-                <Bot /> <span>{selectedAgent?.name ?? "MAIC AI"}</span>
-              </span>
-            </div>
+            <label className="composer-select">
+              <Bot />
+              <select
+                aria-label="选择 Agent"
+                value={selectedAgentKey}
+                onChange={(event) => beginConversation(event.target.value)}
+              >
+                <option value="default">MAIC AI</option>
+                {availableAgents.map((agent) => (
+                  <option
+                    key={`${agent.kind}:${agent.id}`}
+                    value={`${agent.kind}:${agent.id}`}
+                  >
+                    {agent.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="composer-select model-select">
+              <Sparkles />
+              <select
+                aria-label="选择模型"
+                value={selectedModelId}
+                onChange={(event) => {
+                  setSelectedModelId(event.target.value);
+                  beginConversation();
+                }}
+              >
+                {availableModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button
               className="send-button"
               onClick={() => void send()}

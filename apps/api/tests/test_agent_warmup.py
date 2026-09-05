@@ -8,6 +8,7 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.agent import _inject_skill_descriptions, stream_agent, warm_catalog_agents
+from app.llm import LlmModelConfig
 
 
 class DefinitionResult:
@@ -107,14 +108,30 @@ class AgentWarmupTests(unittest.IsolatedAsyncioTestCase):
             patch("app.agent.get_catalog_agent", build),
             self.assertLogs("app.agent", level="ERROR"),
         ):
-            result = await warm_catalog_agents(db)  # type: ignore[arg-type]
+            result = await warm_catalog_agents(
+                db,  # type: ignore[arg-type]
+                LlmModelConfig("openai", "test-model", "test-key"),
+                "test-model",
+            )
 
         self.assertEqual(result, (1, 1))
         self.assertEqual(
             build.await_args_list,
             [
-                unittest.mock.call(db, "agent", agent_id),
-                unittest.mock.call(db, "super_agent", super_agent_id),
+                unittest.mock.call(
+                    db,
+                    "agent",
+                    agent_id,
+                    LlmModelConfig("openai", "test-model", "test-key"),
+                    "test-model",
+                ),
+                unittest.mock.call(
+                    db,
+                    "super_agent",
+                    super_agent_id,
+                    LlmModelConfig("openai", "test-model", "test-key"),
+                    "test-model",
+                ),
             ],
         )
 
